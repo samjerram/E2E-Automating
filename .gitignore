@@ -1,0 +1,18 @@
+# Auth and secrets
+auth.json
+regression_config.json
+config.json
+
+# Generated templates (not required to run; regenerated on demand)
+P2NNI_CSV_Template*.xlsx
+
+# Regression outputs
+regression_results/
+p2nni_regression_results/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env

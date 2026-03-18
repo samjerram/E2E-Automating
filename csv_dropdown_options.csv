@@ -1,0 +1,95 @@
+Column,Option
+Product Type,P2NNI
+B-End Port (Mbps),100
+B-End Port (Mbps),1000
+B-End Port (Mbps),10000
+Bandwidth (Mbps),100
+Bandwidth (Mbps),200
+Bandwidth (Mbps),500
+Bandwidth (Mbps),1000
+Bandwidth (Mbps),10000
+Term Length (months),12
+Term Length (months),24
+Term Length (months),36
+Term Length (months),48
+Term Length (months),60
+Pay Upfront,Yes
+Pay Upfront,No
+Shadow VLAN Required,Yes
+Shadow VLAN Required,No
+FTTP Aggregation,Yes
+FTTP Aggregation,No
+Floor,001 - 1st Floor
+Floor,002 - 2nd Floor
+Floor,003 - 3rd Floor
+Floor,004 - 4th Floor
+Floor,005 - 5th Floor
+Floor,006 - 6th Floor
+Floor,007 - 7th Floor
+Floor,008 - 8th Floor
+Floor,009 - 9th Floor
+Floor,010 - 10th Floor
+Floor,011 - 11th Floor
+Floor,012 - 12th Floor
+Floor,013 - 13th Floor
+Floor,014 - 14th Floor
+Floor,BAS - Basement
+Floor,GND - Ground Floor
+Floor,LGF - Lower Ground Floor
+Floor,MEZ - Mezzanine
+Floor,RFL - Roof floor
+Floor,Top - Top floor
+Room,ADMN - Admin Room
+Room,CNTL - Control Room
+Room,COMP - Computer Room
+Room,DATA - Data Room
+Room,ELEC - Electric Room
+Room,EQP - Equipment Room
+Room,FRME - Frame Room
+Room,ICT - ICT Room
+Room,INTK - Intake Room
+Room,IT - IT Room
+Room,MNGR - Manager Room
+Room,OFF - Office
+Room,PABX - PABX Room
+Room,PBX - PBX Room
+Room,PLNT - Plant Room
+Room,STOR - Store / Storage Room
+Room,SVR - Server Room
+Room,SWTC - Switch Room
+Connector Type,LC
+Connector Type,SC
+Connector Type,RJ45
+Power Supply,AC
+Power Supply,DC
+Media Type,LR
+Media Type,SR
+Media Type,TX
+VLAN Tagging,Yes
+VLAN Tagging,No
+Access Notice,0-48 hours
+Access Notice,Over 48 hours
+Auto Negotiation,Yes
+Auto Negotiation,No
+Hazards on Site,Yes
+Hazards on Site,No
+Building Built Prior 2000,Yes
+Building Built Prior 2000,No
+Asbestos Register,Yes
+Asbestos Register,No
+More Than One Tenant,Yes
+More Than One Tenant,No
+Land Owner Permission Required,Yes
+Land Owner Permission Required,No
+Preferred Supplier,No Specified Supplier
+Preferred Supplier,BT Wholesale
+Preferred Supplier,CityFibre
+Preferred Supplier,Colt
+Preferred Supplier,Neos Networks
+Preferred Supplier,Openreach
+Preferred Supplier,PXC
+Preferred Supplier,Sky via ITS
+Preferred Supplier,Sky via Openreach
+Preferred Supplier,Virgin
+Preferred Supplier,Vodafone National
+Preferred Supplier,Vorboss
