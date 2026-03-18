@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2NNI CSV Upload</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        h1 { font-size: 1.5rem; }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            background: #fafafa;
+        }
+        .upload-area.dragover { border-color: #0066cc; background: #f0f7ff; }
+        input[type="file"] { display: none; }
+        .btn {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .btn:hover { background: #0052a3; }
+        .btn:disabled { background: #999; cursor: not-allowed; }
+        .results {
+            margin-top: 24px;
+            padding: 16px;
+            border-radius: 8px;
+            background: #f5f5f5;
+        }
+        .results.success { background: #e8f5e9; }
+        .results.error { background: #ffebee; }
+        .result-row { padding: 4px 0; }
+        .result-row.pass { color: #2e7d32; }
+        .result-row.fail { color: #c62828; }
+        .error-detail { font-size: 0.75rem; max-height: 120px; overflow: auto; margin: 4px 0 0 16px; padding: 8px; background: #fff3e0; border-radius: 4px; white-space: pre-wrap; }
+        .results-summary { margin-bottom: 8px; }
+        .results-list { margin-bottom: 16px; }
+        .results-download { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(0,0,0,0.1); }
+        .download-btn { display: inline-block; }
+        .loading { color: #666; }
+        .error-msg { color: #c62828; }
+        .progress-box { margin-top: 12px; }
+        .progress-bar {
+            margin-top: 4px;
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar-inner {
+            height: 100%;
+            width: 0%;
+            background: #0066cc;
+            transition: width 0.3s ease;
+        }
+        p { color: #555; font-size: 0.9rem; }
+        .sample-row { margin: 16px 0; display: flex; align-items: center; gap: 12px; }
+        .sample-row label { font-weight: 500; }
+        .sample-row select { padding: 8px 12px; font-size: 1rem; min-width: 220px; border-radius: 6px; }
+        .or { text-align: center; color: #888; margin: 12px 0; }
+        .template-download { margin: 24px 0 32px; padding: 20px; background: #e3f2fd; border-radius: 8px; }
+        .template-download .btn-outline { background: transparent; color: #1565c0; border: 2px solid #1565c0; display: inline-block; margin-bottom: 8px; }
+        .template-download .btn-outline:hover { background: #1565c0; color: white; }
+        .template-download .hint { display: block; font-size: 0.85rem; color: #555; margin-top: 8px; }
+        .upload-section { margin: 32px 0 16px; padding-top: 16px; border-top: 1px solid #e0e0e0; color: #555; }
+        .session-box { margin-bottom: 24px; padding: 16px 20px; border-radius: 8px; background: #f5f5f5; }
+        .session-box.ok { background: #e8f5e9; }
+        .session-box.expired { background: #fff3e0; }
+        .session-status { font-weight: 500; margin-right: 12px; }
+        .session-actions { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .session-actions .btn { padding: 8px 16px; font-size: 0.9rem; }
+        .session-actions .btn-outline { background: transparent; color: #1565c0; border: 2px solid #1565c0; }
+        .session-actions .btn-outline:hover { background: #1565c0; color: white; }
+        .session-msg { font-size: 0.9rem; color: #555; margin-top: 6px; }
+        .results-sharepoint { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 0.9rem; background: #e3f2fd; border: 1px solid #90caf9; }
+        .results-sharepoint.ok { background: #e8f5e9; border-color: #81c784; }
+        .results-sharepoint.warn { background: #fff8e1; border-color: #ffca28; }
+    </style>
+</head>
+<body>
+    <h1>P2NNI CSV Upload</h1>
+
+    <div class="session-box" id="sessionBox">
+        <strong>Step 0:</strong> <span class="session-status" id="sessionStatus">Checking…</span>
+        <div class="session-actions" id="sessionActions">
+            <button type="button" class="btn" id="loginBtn">Login to portal</button>
+            <button type="button" class="btn btn-outline" id="refreshBtn" style="display: none;">Refresh session</button>
+        </div>
+        <p class="session-msg" id="sessionMsg"></p>
+    </div>
+
+    <div class="template-download">
+        <strong>Step 1:</strong>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
+            <a href="/download/template?mode=demo12" class="btn btn-outline" download>Download formatting guide (Demo 1/2)</a>
+            <a href="/download/template?mode=demo34" class="btn btn-outline" download>Download formatting guide (Demo 3/4)</a>
+        </div>
+        <span class="hint">Open in Excel. When pasting from another file, use Paste Special → Values to keep dropdowns. Then Save As → CSV. Demo 1/2 excludes negotiated/list annual/install price columns; Demo 3/4 includes them.</span>
+    </div>
+
+    <div class="upload-section">
+        <strong>Step 2:</strong> Upload your CSV below.
+    </div>
+
+    <div class="upload-area" id="uploadArea">
+        <p>Drag your CSV here or click to choose</p>
+        <input type="file" id="fileInput" accept=".csv">
+    </div>
+
+    <p><strong>Step 3:</strong> Click Run. Results and summary download appear below.</p>
+    <div style="margin-bottom: 8px;">
+        <strong>Run mode:</strong>
+        <label style="margin-left: 8px;">
+            <input type="radio" name="demoMode" value="demo1" checked>
+            Demo 1 – customer only (submit for review)
+        </label>
+        <label style="margin-left: 8px;">
+            <input type="radio" name="demoMode" value="demo2">
+            Demo 2 – place order &amp; capture Basket Id (slower)
+        </label>
+        <label style="margin-left: 8px;">
+            <input type="radio" name="demoMode" value="demo3">
+            Demo 3 – adjust quote (internal first), no Basket Id
+        </label>
+        <label style="margin-left: 8px;">
+            <input type="radio" name="demoMode" value="demo4">
+            Demo 4 – adjust quote (internal first) &amp; capture Basket Id
+        </label>
+    </div>
+    <div id="showBrowserRow" style="margin: 8px 0 12px 0; display: none;">
+        <label>
+            <input type="checkbox" name="showBrowser" id="showBrowser" value="1">
+            Show browser (watch where Demo 1 is slow)
+        </label>
+    </div>
+    <button class="btn" id="runBtn" disabled>Run</button>
+
+    <div id="status"></div>
+    <div id="progress" class="progress-box" style="display: none;">
+        <div id="progressText" class="loading"></div>
+        <div class="progress-bar">
+            <div id="progressBarInner" class="progress-bar-inner"></div>
+        </div>
+    </div>
+    <div id="results"></div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const runBtn = document.getElementById('runBtn');
+        const status = document.getElementById('status');
+        const results = document.getElementById('results');
+        const progressBox = document.getElementById('progress');
+        const progressText = document.getElementById('progressText');
+        const progressBarInner = document.getElementById('progressBarInner');
+        const sessionBox = document.getElementById('sessionBox');
+        const sessionStatus = document.getElementById('sessionStatus');
+        const sessionMsg = document.getElementById('sessionMsg');
+        const loginBtn = document.getElementById('loginBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+
+        let selectedFile = null;
+        let sessionOk = false;
+        let progressTimer = null;
+
+        function resetProgress() {
+            if (progressTimer) {
+                clearInterval(progressTimer);
+                progressTimer = null;
+            }
+            progressText.textContent = '';
+            progressBarInner.style.width = '0%';
+            progressBox.style.display = 'none';
+        }
+
+        async function fetchRunProgress() {
+            try {
+                const res = await fetch('/api/run-progress');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data || !data.active) {
+                    progressText.textContent = 'Preparing run…';
+                    progressBarInner.style.width = '0%';
+                    return;
+                }
+                const total = data.total || 0;
+                const completed = data.completed || 0;
+                let percent = 0;
+                if (total > 0) {
+                    percent = Math.round((completed / total) * 100);
+                }
+                const percentToShow = Math.min(percent, 100);
+                const labelParts = [];
+                if (total > 0) {
+                    labelParts.push(`${completed} of ${total} presets (${percentToShow}%)`);
+                }
+                if (data.current_preset && data.current_elapsed_sec != null) {
+                    const min = Math.floor(data.current_elapsed_sec / 60);
+                    const sec = data.current_elapsed_sec % 60;
+                    const elapsed = min >= 1 ? `${min} min` : `${sec}s`;
+                    labelParts.push(`Running: ${data.current_preset} — ${elapsed}`);
+                } else if (data.last_preset_id) {
+                    labelParts.push(`Last: ${data.last_preset_id} — ${data.last_status || ''}`);
+                }
+                progressText.textContent = labelParts.join(' · ') || 'Running presets…';
+                progressBarInner.style.width = percentToShow + '%';
+            } catch (e) {
+                // Ignore progress errors
+            }
+        }
+
+        function startProgressPolling() {
+            progressBox.style.display = 'block';
+            fetchRunProgress();
+            if (progressTimer) clearInterval(progressTimer);
+            progressTimer = setInterval(fetchRunProgress, 2500);
+        }
+
+        async function fetchSessionStatus() {
+            try {
+                const res = await fetch('/api/session-status');
+                const data = await res.json();
+                sessionOk = data.ok === true;
+                sessionBox.classList.remove('ok', 'expired');
+                loginBtn.style.display = sessionOk ? 'none' : '';
+                refreshBtn.style.display = sessionOk ? '' : 'none';
+                if (sessionOk) {
+                    sessionStatus.textContent = 'Session: OK';
+                    sessionBox.classList.add('ok');
+                    sessionMsg.textContent = 'You can run your CSV below.';
+                } else {
+                    sessionStatus.textContent = 'Session: not logged in';
+                    sessionBox.classList.add('expired');
+                    sessionMsg.textContent = 'Click "Login to portal" – a browser will open. Log in there, then come back here.';
+                }
+                updateRunButton();
+                return sessionOk;
+            } catch (e) {
+                sessionStatus.textContent = 'Session: couldn’t check';
+                sessionBox.classList.add('expired');
+                sessionMsg.textContent = 'Make sure the app is running and refresh the page.';
+                loginBtn.style.display = '';
+                refreshBtn.style.display = 'none';
+                updateRunButton();
+                return false;
+            }
+        }
+
+        async function doLogin() {
+            loginBtn.disabled = true;
+            refreshBtn.disabled = true;
+            sessionStatus.textContent = 'Opening browser…';
+            sessionMsg.textContent = 'Log in there, then this page will update.';
+            try {
+                const res = await fetch('/api/login', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (data.ok) {
+                    await fetchSessionStatus();
+                } else {
+                    sessionStatus.textContent = 'Login failed';
+                    sessionMsg.textContent = data.error || 'Try again.';
+                    await fetchSessionStatus();
+                }
+            } catch (e) {
+                sessionStatus.textContent = 'Error';
+                sessionMsg.textContent = e.message || 'Try again.';
+                await fetchSessionStatus();
+            }
+            loginBtn.disabled = false;
+            refreshBtn.disabled = false;
+        }
+
+        loginBtn.addEventListener('click', doLogin);
+        refreshBtn.addEventListener('click', doLogin);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchSessionStatus();
+
+            document.querySelectorAll('input[name="demoMode"]').forEach(el => {
+                el.addEventListener('change', () => {
+                    const demo1 = document.querySelector('input[name="demoMode"]:checked').value === 'demo1';
+                    document.getElementById('showBrowserRow').style.display = demo1 ? 'block' : 'none';
+                });
+            });
+            const demo1 = document.querySelector('input[name="demoMode"]:checked').value === 'demo1';
+            document.getElementById('showBrowserRow').style.display = demo1 ? 'block' : 'none';
+        });
+
+        function updateRunButton() {
+            runBtn.disabled = !sessionOk || !selectedFile;
+        }
+
+        uploadArea.addEventListener('click', () => fileInput.click());
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleFile(e.target.files[0]);
+        });
+
+        function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.csv')) {
+                status.innerHTML = '<span class="error-msg">Please select a CSV file.</span>';
+                selectedFile = null;
+                updateRunButton();
+                return;
+            }
+            selectedFile = file;
+            uploadArea.querySelector('p').textContent = file.name;
+            status.innerHTML = '';
+            results.innerHTML = '';
+            updateRunButton();
+        }
+
+        function escapeHtml(s) {
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        function renderResults(data) {
+            const cls = data.failed > 0 ? '' : 'success';
+            let html = '<div class="results ' + cls + '">';
+            html += '<div class="results-summary"><strong>Summary:</strong> ' + data.passed + ' passed, ' + data.failed + ' failed (' + (data.passed + data.failed) + ' total)</div>';
+            html += '<div class="results-list"><strong>Results:</strong>';
+            (data.results || []).forEach(r => {
+                const rowClass = r.result === 'Pass' ? 'pass' : 'fail';
+                html += '<div class="result-row ' + rowClass + '">' + (r.result === 'Pass' ? '✓' : '✗') + ' ' + r.preset_id + ' (' + r.duration_sec + 's)';
+                if (r.result === 'Fail' && r.error_detail) {
+                    html += '<pre class="error-detail">' + escapeHtml(r.error_detail) + '</pre>';
+                }
+                html += '</div>';
+            });
+            html += '</div>';
+            if (data.summary_filename) {
+                html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary CSV</a></div>';
+            }
+            if (data.summary_powerbi_filename) {
+                html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_powerbi_filename) + '" class="btn download-btn" download>Download Power BI CSV</a></div>';
+            }
+            if (data.sharepoint && data.sharepoint.folder_url) {
+                html += '<div class="results-sharepoint ok"><strong>Upload summary manually:</strong> <a href="' + escapeHtml(data.sharepoint.folder_url) + '" target="_blank" rel="noopener">Open Power BI folder</a></div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        runBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            runBtn.disabled = true;
+            runBtn.textContent = 'Running…';
+            status.innerHTML = '<span class="loading">Running automation… Do not close this page.</span>';
+            results.innerHTML = '';
+            progressBox.style.display = 'block';
+            progressText.textContent = 'Preparing run…';
+            progressBarInner.style.width = '0%';
+            startProgressPolling();
+
+            const ok = await fetchSessionStatus();
+            if (!ok) {
+                status.innerHTML = '<span class="error-msg">Please log in first (Step 0). Click "Login to portal", then try again.</span>';
+                runBtn.disabled = false;
+                runBtn.textContent = 'Run';
+                resetProgress();
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('csv', selectedFile);
+            const modeEls = document.querySelectorAll('input[name="demoMode"]');
+            let mode = 'demo1';
+            modeEls.forEach(el => {
+                if (el.checked) mode = el.value;
+            });
+            formData.append('mode', mode);
+            const showBrowserEl = document.getElementById('showBrowser');
+            if (showBrowserEl && showBrowserEl.checked) formData.append('show_browser', '1');
+
+            try {
+                const res = await fetch('/run', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const text = await res.text();
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (parseErr) {
+                    status.innerHTML = '<span class="error-msg">Server returned an error (invalid response). Try again or check the terminal.</span>';
+                    runBtn.disabled = false;
+                    runBtn.textContent = 'Run';
+                    resetProgress();
+                    return;
+                }
+
+                if (!res.ok) {
+                    if (res.status === 401 && (data.code === 'SESSION_EXPIRED' || (data.error && data.error.indexOf('session') !== -1))) {
+                        sessionOk = false;
+                        await fetchSessionStatus();
+                        status.innerHTML = '<span class="error-msg">Session expired. Click "Login to portal" or "Refresh session", then run again.</span>';
+                    } else {
+                        status.innerHTML = '<span class="error-msg">' + (data.error || 'Request failed') + '</span>';
+                        if (data.details) {
+                            results.innerHTML = '<div class="results error"><pre>' + (data.details.join ? data.details.join('\n') : data.details) + '</pre></div>';
+                        }
+                    }
+                    runBtn.disabled = false;
+                    runBtn.textContent = 'Run';
+                    resetProgress();
+                    return;
+                }
+
+                if (res.ok && data.ok) {
+                    const cls = data.failed > 0 ? '' : 'success';
+                    let html = '<div class="results ' + cls + '">';
+                    html += '<div class="results-summary"><strong>Summary:</strong> ' + data.passed + ' passed, ' + data.failed + ' failed (' + data.total + ' total)</div>';
+                    html += '<div class="results-list"><strong>Results:</strong>';
+                    data.results.forEach(r => {
+                        const rowClass = r.result === 'Pass' ? 'pass' : 'fail';
+                        html += '<div class="result-row ' + rowClass + '">' + (r.result === 'Pass' ? '✓' : '✗') + ' ' + r.preset_id + ' (' + r.duration_sec + 's)';
+                        if (r.result === 'Fail' && r.error_detail) {
+                            html += '<pre class="error-detail">' + escapeHtml(r.error_detail) + '</pre>';
+                        }
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                    if (data.summary_filename) {
+                        html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary CSV</a></div>';
+                    }
+                    if (data.summary_powerbi_filename) {
+                        html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_powerbi_filename) + '" class="btn download-btn" download>Download Power BI CSV</a></div>';
+                    }
+                    if (data.sharepoint && data.sharepoint.folder_url) {
+                        html += '<div class="results-sharepoint ok"><strong>Upload summary manually:</strong> <a href="' + escapeHtml(data.sharepoint.folder_url) + '" target="_blank" rel="noopener">Open Power BI folder</a></div>';
+                    }
+                    html += '</div>';
+                    status.innerHTML = 'Done.';
+                    results.innerHTML = html;
+                }
+            } catch (err) {
+                status.innerHTML = '<span class="error-msg">Error: ' + escapeHtml(err.message) + '</span>';
+            }
+            runBtn.disabled = false;
+            runBtn.textContent = 'Run';
+            resetProgress();
+        });
+    </script>
+</body>
+</html>
