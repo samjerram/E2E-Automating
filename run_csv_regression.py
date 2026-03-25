@@ -88,6 +88,10 @@ class RowResult:
     term_length: str = ""
     completed_at: str = ""  # Per-row completion timestamp
     basket_id: str = ""  # Demo 2: internal user flow
+    negotiated_annual: str = ""
+    negotiated_install: str = ""
+    list_annual: str = ""
+    list_install: str = ""
 
 
 def find_presets(presets_dir: Path) -> list[Path]:
@@ -462,8 +466,13 @@ def validate_csv(path: Path) -> tuple[list[dict], list[str]]:
     return rows, errors
 
 
-def _run_preset_in_process_impl(preset_path: Path, postcode_override: str | None, suppress_output: bool):
-    """Runs the real run_preset in-process; returns (exit_code, duration_sec, err, order_id, quotation_id, line_id, tcv_total, start_supplier, install_price, annual_rental, ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url)."""
+def _run_preset_in_process_impl(
+    preset_path: Path,
+    postcode_override: str | None,
+    suppress_output: bool,
+    headless: bool,
+):
+    """Runs the real run_preset in-process; returns order/quote urls so Demo 2 can open orders."""
     import contextlib
     import io
     import traceback
@@ -479,7 +488,7 @@ def _run_preset_in_process_impl(preset_path: Path, postcode_override: str | None
             contextlib.redirect_stdout(out or sys.stdout),
             contextlib.redirect_stderr(out or sys.stderr),
         ):
-            ret = _run_preset_impl(preset_path, postcode_override, headless=True, pause=False)
+            ret = _run_preset_impl(preset_path, postcode_override, headless=headless, pause=False)
         if isinstance(ret, tuple) and len(ret) >= 3:
             order_id = (ret[0] or "") if ret[0] is not None else ""
             quotation_id = (ret[1] or "") if len(ret) > 1 and ret[1] is not None else ""
@@ -572,10 +581,18 @@ def run_preset(preset_path: Path, postcode_override: str | None, headless: bool 
     except ImportError:
         _run_preset_impl = None
 
-    if _run_preset_impl and headless:
+    # Always prefer in-process execution so we can return scraped fields like `order_url`.
+    # This is critical for Demo 2 when customer run is headful ("Show browser").
+    if _run_preset_impl:
         start = time.perf_counter()
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_run_preset_in_process_impl, preset_path, postcode_override, suppress_output)
+            future = executor.submit(
+                _run_preset_in_process_impl,
+                preset_path,
+                postcode_override,
+                suppress_output,
+                headless,
+            )
             try:
                 return future.result(timeout=PRESET_TIMEOUT_SEC)
             except FuturesTimeoutError:
@@ -628,8 +645,8 @@ def prompt_for_csv() -> Path | None:
     return p if p.exists() else None
 
 
-# Power BI / SharePoint bridge: headers aligned with boss's Power BI for live data.
-SUMMARY_CSV_HEADERS = [
+# Power BI / SharePoint bridge: base headers for live data.
+SUMMARY_CSV_BASE_HEADERS = [
     "Preset ID",
     "StartPostCode",
     "EndPostCode",
@@ -646,12 +663,28 @@ SUMMARY_CSV_HEADERS = [
     "FTTP Aggregation",
     "Quote",
     "Order",
-    "BasketId",
     "Result",
     "Duration (seconds)",
     "Date Completed",
     "Error",
 ]
+
+
+def _summary_headers_for_mode(mode: str) -> list[str]:
+    m = (mode or "").strip().lower()
+    headers = list(SUMMARY_CSV_BASE_HEADERS)
+    if m in ("demo3", "demo4"):
+        insert_at = headers.index("Quote")
+        headers[insert_at:insert_at] = [
+            "NegotiatedAnnual",
+            "NegotiatedInstall",
+            "ListAnnual",
+            "ListInstall",
+        ]
+    if m in ("demo2", "demo4"):
+        insert_at = headers.index("Result")
+        headers.insert(insert_at, "BasketId")
+    return headers
 
 
 def _format_tcv(raw: str) -> str:
@@ -738,19 +771,19 @@ def _extract_basket_id_from_page(page) -> str:
     return ""
 
 
-def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str) -> None:
+def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, headers: list[str]) -> None:
     """Write summary to Excel with Order and Quote as clickable HYPERLINK formulas."""
     if not OPENPYXL_AVAILABLE:
         return
     wb = Workbook()
     ws = wb.active
     ws.title = "Summary"
-    for col_idx, header in enumerate(SUMMARY_CSV_HEADERS, start=1):
+    for col_idx, header in enumerate(headers, start=1):
         ws.cell(row=1, column=col_idx, value=header)
     # Track max text length per column to size widths to content (esp. Order/Quote)
-    max_len: dict[str, int] = {h: len(h) for h in SUMMARY_CSV_HEADERS}
-    order_col = SUMMARY_CSV_HEADERS.index("Order") + 1 if "Order" in SUMMARY_CSV_HEADERS else 0
-    quote_col = SUMMARY_CSV_HEADERS.index("Quote") + 1 if "Quote" in SUMMARY_CSV_HEADERS else 0
+    max_len: dict[str, int] = {h: len(h) for h in headers}
+    order_col = headers.index("Order") + 1 if "Order" in headers else 0
+    quote_col = headers.index("Quote") + 1 if "Quote" in headers else 0
     for row_idx, r in enumerate(results, start=2):
         row_data = {
             "Preset ID": r.preset_id,
@@ -768,6 +801,10 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str) -
             "AnnualRental": _format_currency(getattr(r, "annual_rental", "") or ""),
             "FTTP Aggregation": _format_currency(getattr(r, "ftpp_aggregation", "") or ""),
             "BasketId": getattr(r, "basket_id", "") or "",
+            "NegotiatedAnnual": _format_currency(getattr(r, "negotiated_annual", "") or ""),
+            "NegotiatedInstall": _format_currency(getattr(r, "negotiated_install", "") or ""),
+            "ListAnnual": _format_currency(getattr(r, "list_annual", "") or ""),
+            "ListInstall": _format_currency(getattr(r, "list_install", "") or ""),
             "Order": getattr(r, "order_number", "") or "",
             "Quote": getattr(r, "quote_number", "") or "",
             "Result": r.result,
@@ -775,7 +812,7 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str) -
             "Date Completed": getattr(r, "completed_at", date_str) or date_str,
             "Error": (getattr(r, "error_detail", "") or "")[:2000],
         }
-        for col_idx, header in enumerate(SUMMARY_CSV_HEADERS, start=1):
+        for col_idx, header in enumerate(headers, start=1):
             val = row_data.get(header, "")
             # For width, use display text length; for hyperlinks use ID text, not full formula
             if header == "Order":
@@ -802,7 +839,7 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str) -
             else:
                 ws.cell(row=row_idx, column=col_idx, value=val)
     # Apply column widths based on max text length (cap to avoid huge "Error" column)
-    for col_idx, header in enumerate(SUMMARY_CSV_HEADERS, start=1):
+    for col_idx, header in enumerate(headers, start=1):
         from openpyxl.utils import get_column_letter
         width = min(max_len.get(header, len(header)) + 2, 40)
         ws.column_dimensions[get_column_letter(col_idx)].width = width
@@ -815,12 +852,14 @@ def print_summary(
     summary_path: Path | None,
     summary_path_powerbi: Path | None = None,
     run_id: str | None = None,
+    mode: str = "demo1",
 ):
     """Print and optionally save summary. run_id: same for all rows in this run (for Power BI)."""
     passed = sum(1 for r in results if r.exit_code == 0)
     failed = len(results) - passed
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     run_id = run_id or date_str
+    headers = _summary_headers_for_mode(mode)
 
     print("\n" + "=" * 60)
     print("  REGRESSION SUMMARY")
@@ -842,8 +881,8 @@ def print_summary(
         summary_powerbi = summary_path_powerbi or summary_path.with_name(summary_path.stem + "_powerbi.csv")
         with open(summary_path, "w", newline="", encoding="utf-8") as f_pretty, \
              open(summary_powerbi, "w", newline="", encoding="utf-8") as f_pbi:
-            w_pretty = csv.DictWriter(f_pretty, fieldnames=SUMMARY_CSV_HEADERS, extrasaction="ignore")
-            w_pbi = csv.DictWriter(f_pbi, fieldnames=SUMMARY_CSV_HEADERS, extrasaction="ignore")
+            w_pretty = csv.DictWriter(f_pretty, fieldnames=headers, extrasaction="ignore")
+            w_pbi = csv.DictWriter(f_pbi, fieldnames=headers, extrasaction="ignore")
             w_pretty.writeheader()
             w_pbi.writeheader()
             for r in results:
@@ -879,6 +918,10 @@ def print_summary(
                     "AnnualRental": _format_currency(annual_raw),
                     "FTTP Aggregation": _format_currency(ftpp_raw),
                     "BasketId": getattr(r, "basket_id", "") or "",
+                    "NegotiatedAnnual": _format_currency(getattr(r, "negotiated_annual", "") or ""),
+                    "NegotiatedInstall": _format_currency(getattr(r, "negotiated_install", "") or ""),
+                    "ListAnnual": _format_currency(getattr(r, "list_annual", "") or ""),
+                    "ListInstall": _format_currency(getattr(r, "list_install", "") or ""),
                     "Order": order_cell,
                     "Quote": quote_cell,
                     "Result": r.result,
@@ -897,6 +940,10 @@ def print_summary(
                 base_row_pbi["InstallPrice"] = _currency_numeric(install_raw)
                 base_row_pbi["AnnualRental"] = _currency_numeric(annual_raw)
                 base_row_pbi["FTTP Aggregation"] = _currency_numeric(ftpp_raw)
+                base_row_pbi["NegotiatedAnnual"] = _currency_numeric(getattr(r, "negotiated_annual", "") or "")
+                base_row_pbi["NegotiatedInstall"] = _currency_numeric(getattr(r, "negotiated_install", "") or "")
+                base_row_pbi["ListAnnual"] = _currency_numeric(getattr(r, "list_annual", "") or "")
+                base_row_pbi["ListInstall"] = _currency_numeric(getattr(r, "list_install", "") or "")
                 w_pbi.writerow(base_row_pbi)
 
         print(f"\n  Summary saved to: {summary_path}")
@@ -904,7 +951,7 @@ def print_summary(
         # Also write Excel with clickable Order/Quote hyperlinks
         summary_xlsx = summary_path.with_suffix(".xlsx")
         try:
-            _write_summary_xlsx(results, summary_xlsx, date_str)
+            _write_summary_xlsx(results, summary_xlsx, date_str, headers)
             print(f"  Excel summary (clickable Order/Quote links): {summary_xlsx}\n")
         except Exception as e:
             print(f"  (Excel summary skipped: {e})\n")
@@ -931,13 +978,18 @@ def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> N
     print("  DEMO 2: Internal login to capture BasketId")
     print("=" * 60)
 
-    # For Demo 2 we run the internal browser **visible** so you can watch what happens.
-    # This does not affect the main customer run (which still uses headless Playwright).
+    # For Demo 2 we keep the internal NEOS browser headless by default.
+    # The main customer run visibility is controlled elsewhere (P2NNI_DEMO2_HEADLESS).
+    # If you specifically want to watch the internal steps, set:
+    #   P2NNI_DEMO2_INTERNAL_HEADLESS=0
+    internal_headless = os.getenv("P2NNI_DEMO2_INTERNAL_HEADLESS", "1") != "0"
+    slow_mo = 0 if internal_headless else 200
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, slow_mo=200)
+        browser = p.chromium.launch(headless=internal_headless, slow_mo=slow_mo)
         context = browser.new_context()
         page = context.new_page()
         page.set_default_timeout(10000)
+        print(f"  Internal NEOS browser: headless={internal_headless} (slow_mo={slow_mo})")
 
         def _login_internal():
             print("🔐 Logging in as NEOS internal user…")
@@ -1017,9 +1069,10 @@ def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> N
             browser.close()
             return
 
-        # Process each successful order
+        # Process each successful order (needs order_url so we can open the order directly)
         successful = [r for r in results if r.result == "Pass" and r.order_url]
         total = len(successful)
+        print(f"  ✅ Internal candidates with order_url: {total}/{len(results)}")
         for idx, r in enumerate(successful, 1):
             print(f"\n[Demo 2] ({idx}/{total}) Processing order for preset {r.preset_id}…")
             # Open the order directly via its URL — this matches how you navigate back after placing.
@@ -1099,30 +1152,17 @@ def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> N
                 print(f"  ⚠️ Error while trying to click 'Place order' / 'OK': {e}")
                 did_click_place = False
 
-            # Poll for Basket Id with periodic reload of the specific order URL.
-            # Basket Id typically appears ~45–90 seconds after placing, so reload + check every ~10s for up to ~3 minutes.
-            print("  ⏳ Waiting for Basket Id to appear (reloading order page every 10s)…")
+            # Poll for Basket Id: faster interval, similar total window (Demo 2 & 4).
+            print("  ⏳ Waiting for Basket Id to appear (refreshing every ~3.2s, up to ~80s)…")
             basket_id = ""
-            for attempt in range(1, 19):  # ~18 * 10s ≈ 3 minutes total
+            refresh_interval_ms = 3200
+            max_attempts = 25  # ~80s total
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    # 1) Reload the order page first
+                    if attempt == 1 or attempt % 3 == 0:
+                        print(f"    ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
                     page.goto(r.order_url, wait_until="domcontentloaded", timeout=60000)
-                    # 2) Then wait ~10 seconds on the freshly loaded page so async JS can update the header
-                    page.wait_for_timeout(10000)
-                    try:
-                        # Read full text once, like Install/Annual/FTTP scraping
-                        body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
-                    except Exception:
-                        body = ""
-
-                    # Debug: show whether Playwright can currently see any "Basket" text at all
-                    if "Basket" in body or "basket" in body:
-                        snippet_match = re.search(r"Basket.{0,80}", body, re.IGNORECASE)
-                        snippet = snippet_match.group(0) if snippet_match else "(Basket* present but no nearby snippet)"
-                        print(f"    🔍 Attempt {attempt}/18 body snippet around 'Basket': {snippet!r}")
-                    else:
-                        print(f"    …no 'Basket' text yet in page body (attempt {attempt}/18).")
-
+                    page.wait_for_timeout(refresh_interval_ms)  # 5s between refreshes
                     basket_id = _extract_basket_id_from_page(page)
                     if basket_id:
                         break
@@ -1178,12 +1218,19 @@ def run_csv_regression(
         print("\n  Processing your CSV... (runs in background, no browser window)")
         print("  Please wait...\n")
 
+    # Browser visibility defaults:
+    #   - headless unless you explicitly set a demo-specific env var to "0".
     # Demo 1: allow visible browser via P2NNI_DEMO1_HEADLESS=0 (watch where time is spent)
     headless = True  # default: no browser popup
     if mode == "demo1":
         headless = os.getenv("P2NNI_DEMO1_HEADLESS", "1") != "0"
+    if mode == "demo2":
+        headless = os.getenv("P2NNI_DEMO2_HEADLESS", "1") != "0"
     if not headless and quiet:
-        print("  (Browser visible: P2NNI_DEMO1_HEADLESS=0)\n")
+        if mode == "demo1":
+            print("  (Browser visible: P2NNI_DEMO1_HEADLESS=0)\n")
+        elif mode == "demo2":
+            print("  (Browser visible: P2NNI_DEMO2_HEADLESS=0)\n")
     suppress_output = quiet  # When quiet, hide preset script output; when verbose, show it
     results: list[RowResult] = []
     start_total = time.perf_counter()
@@ -1354,6 +1401,10 @@ def run_csv_regression(
             term_length=_term_months(q.get("contract_term")),
             completed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             basket_id=basket_id_from_run or "",
+            negotiated_annual=str(q.get("negotiated_annual") or "").strip(),
+            negotiated_install=str(q.get("negotiated_install") or "").strip(),
+            list_annual=str(q.get("list_annual") or "").strip(),
+            list_install=str(q.get("list_install") or "").strip(),
         )
         results.append(result)
         if progress_callback is not None:
@@ -1380,8 +1431,22 @@ def run_csv_regression(
     # Optional Demo 2: internal user flow to capture BasketId (kept separate so Demo 1 runtime is unchanged)
     fill_basket_ids_with_internal_user(results, mode)
 
+    # Enforce "full completion" semantics per demo mode.
+    # The UI currently keys off `exit_code`/`result` to show green/red.
+    # For modes that request BasketId capture, we must fail the row if BasketId isn't captured.
+    demo_mode = str(mode).strip().lower()
+    require_basket_id = demo_mode in ("demo2", "demo4")
+    if require_basket_id:
+        for r in results:
+            if r.exit_code == 0 and not (getattr(r, "basket_id", "") or "").strip():
+                r.exit_code = 1
+                r.result = "Fail"
+                r.error_detail = (r.error_detail + "\n" if r.error_detail else "") + (
+                    "Demo requirement not met: BasketId capture requested, but BasketId was not captured."
+                )
+
     total_duration = time.perf_counter() - start_total
-    print_summary(results, total_duration, summary_path, summary_path_powerbi, run_id=run_id_readable)
+    print_summary(results, total_duration, summary_path, summary_path_powerbi, run_id=run_id_readable, mode=mode)
     failed = sum(1 for r in results if r.exit_code != 0)
     return 1 if failed > 0 else 0, results, summary_path, summary_path_powerbi
 

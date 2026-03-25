@@ -2,6 +2,61 @@
 
 This file records **official, known-good checkpoints** you can roll back to or reference later.
 
+**Latest:** **v6** (2026-03-25) — robustness (VLAN, FTTP, upfront, submit-for-review, pricing wait) + Demo 2 speed.
+
+---
+
+## OFFICIAL CHECKPOINT v6 — VLAN/FTTP/submit/pricing robustness + Demo 2 speed (2026-03-25)
+
+**Status:** OFFICIAL CHECKPOINT v6 — stable customer + internal flows with faster headful runs, supplier-aware option fallbacks, and reliable “Submit for review”.
+
+### What this checkpoint adds (on top of v5)
+
+- **A-End VLAN (Site Config)**  
+  - Fast path fills `#aEndLocation_vlanId` and `#aEndLocation_shadowVLANId` first with shorter settle times, then falls back to section/role locators.  
+  - Post-save verification uses those IDs when visible and fixes label regex (`\s*`, not over-escaped).  
+  - `shadow_value` defined for all paths so retry logic cannot reference an undefined variable.
+
+- **FTTP aggregation**  
+  - `apply_fttp_aggregation_with_fallback`: if CSV asks for **Yes** but the portal disables it (e.g. some suppliers), logs clearly and selects **No** so the journey continues.  
+  - `toggle_fttp_aggregation` returns `bool` and **never** forces clicks on disabled radios.
+
+- **Pay upfront**  
+  - If the CSV choice’s radio is **disabled** for that quote, selects the opposite option with a one-level nested fallback so recursion cannot loop if both are disabled.
+
+- **Submit order for review (customer)**  
+  - Removed the false “success” path that treated the **step heading** “Submit order for review” as completion.  
+  - Terms: **JS tick first**, broader copy/ancestor matching, then Playwright strategies; shorter waits for enabled **Submit for review** and post-click confirmation.  
+  - `fill_order_billing_screen` only prints preset-complete when submit actually reports success.
+
+- **Pricing UI wait (after Get price)**  
+  - `_wait_for_pricing_ui_ready`: in-browser `wait_for_function` with **75ms** polling plus earlier signals (e.g. `img.supplier_image`, slick track tiles, FTTP section text).  
+  - **Updating…** overlay cleared right after **Get price** and again before readiness.  
+  - Shorter log line: `⏳ Waiting for pricing UI…` and `✅ Pricing UI ready` (with optional elapsed seconds).
+
+- **Demo 2 / headful speed**  
+  - Default Playwright **slow_mo** when headful reduced (**~35ms**; override with `P2NNI_PLAYWRIGHT_SLOW_MO`).  
+  - Shorter post–**Find** settle, faster Basket Id polling interval (~3.2s, 25 attempts).  
+  - Web UI run-progress polling **~2s** for snappier updates during runs.
+
+### How to lock / revert exactly
+
+Locked as git tag **`checkpoint-v6-2026-03-25`**.
+
+```bash
+git fetch --tags
+git switch -c recover-v6 checkpoint-v6-2026-03-25
+```
+
+### Key files in this checkpoint
+
+- `run_preset.py` — VLAN id path, FTTP/upfront fallbacks, `submit_order_for_review` / terms helpers, `_wait_for_pricing_ui_ready`, `select_access_and_configuration` overlay after Get price, headful `slow_mo` + `import os`.  
+- `run_csv_regression.py` — Basket Id poll timing for Demo 2/4.  
+- `templates/index.html` — progress poll interval.  
+- `CHECKPOINT.md` — this entry.
+
+Use **v6** as the primary “known good” reference for current P2NNI automation behaviour. **v5** and earlier remain historical.
+
 ---
 
 ## OFFICIAL CHECKPOINT v4 — Demo 1 + Demo 2 with automated BasketId capture (2026-03-04)

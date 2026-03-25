@@ -141,13 +141,16 @@
             Demo 4 – adjust quote (internal first) &amp; capture Basket Id
         </label>
     </div>
-    <div id="showBrowserRow" style="margin: 8px 0 12px 0; display: none;">
+    <div id="showBrowserRow" style="margin: 8px 0 12px 0; display: block;">
         <label>
             <input type="checkbox" name="showBrowser" id="showBrowser" value="1">
-            Show browser (watch where Demo 1 is slow)
+            Show browser (watch where the selected demo is slow)
         </label>
     </div>
-    <button class="btn" id="runBtn" disabled>Run</button>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button class="btn" id="runBtn" disabled>Run</button>
+        <button class="btn" id="runPbiBtn" disabled title="Run, download Power BI CSV, and open SharePoint folder">Run to PBI</button>
+    </div>
 
     <div id="status"></div>
     <div id="progress" class="progress-box" style="display: none;">
@@ -162,6 +165,7 @@
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
         const runBtn = document.getElementById('runBtn');
+        const runPbiBtn = document.getElementById('runPbiBtn');
         const status = document.getElementById('status');
         const results = document.getElementById('results');
         const progressBox = document.getElementById('progress');
@@ -227,7 +231,7 @@
             progressBox.style.display = 'block';
             fetchRunProgress();
             if (progressTimer) clearInterval(progressTimer);
-            progressTimer = setInterval(fetchRunProgress, 2500);
+            progressTimer = setInterval(fetchRunProgress, 2000);
         }
 
         async function fetchSessionStatus() {
@@ -290,18 +294,12 @@
         document.addEventListener('DOMContentLoaded', () => {
             fetchSessionStatus();
 
-            document.querySelectorAll('input[name="demoMode"]').forEach(el => {
-                el.addEventListener('change', () => {
-                    const demo1 = document.querySelector('input[name="demoMode"]:checked').value === 'demo1';
-                    document.getElementById('showBrowserRow').style.display = demo1 ? 'block' : 'none';
-                });
-            });
-            const demo1 = document.querySelector('input[name="demoMode"]:checked').value === 'demo1';
-            document.getElementById('showBrowserRow').style.display = demo1 ? 'block' : 'none';
+            // Show-browser is available for all demos; no need to hide it based on mode.
         });
 
         function updateRunButton() {
             runBtn.disabled = !sessionOk || !selectedFile;
+            runPbiBtn.disabled = !sessionOk || !selectedFile;
         }
 
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -370,23 +368,35 @@
             return html;
         }
 
-        runBtn.addEventListener('click', async () => {
+        async function runAutomation(pbiAssist = false) {
             if (!selectedFile) return;
 
             runBtn.disabled = true;
+            runPbiBtn.disabled = true;
             runBtn.textContent = 'Running…';
+            runPbiBtn.textContent = pbiAssist ? 'Running to PBI…' : 'Run to PBI';
             status.innerHTML = '<span class="loading">Running automation… Do not close this page.</span>';
             results.innerHTML = '';
             progressBox.style.display = 'block';
             progressText.textContent = 'Preparing run…';
             progressBarInner.style.width = '0%';
             startProgressPolling();
+            let pbiTab = null;
+            if (pbiAssist) {
+                // Open tab early to avoid browser popup blockers after async work.
+                pbiTab = window.open('about:blank', '_blank');
+                if (pbiTab) {
+                    pbiTab.document.write('<p style="font-family:sans-serif;padding:20px;">Preparing Power BI folder…</p>');
+                }
+            }
 
             const ok = await fetchSessionStatus();
             if (!ok) {
                 status.innerHTML = '<span class="error-msg">Please log in first (Step 0). Click "Login to portal", then try again.</span>';
                 runBtn.disabled = false;
+                runPbiBtn.disabled = false;
                 runBtn.textContent = 'Run';
+                runPbiBtn.textContent = 'Run to PBI';
                 resetProgress();
                 return;
             }
@@ -414,7 +424,9 @@
                 } catch (parseErr) {
                     status.innerHTML = '<span class="error-msg">Server returned an error (invalid response). Try again or check the terminal.</span>';
                     runBtn.disabled = false;
+                    runPbiBtn.disabled = false;
                     runBtn.textContent = 'Run';
+                    runPbiBtn.textContent = 'Run to PBI';
                     resetProgress();
                     return;
                 }
@@ -431,7 +443,9 @@
                         }
                     }
                     runBtn.disabled = false;
+                    runPbiBtn.disabled = false;
                     runBtn.textContent = 'Run';
+                    runPbiBtn.textContent = 'Run to PBI';
                     resetProgress();
                     return;
                 }
@@ -453,7 +467,7 @@
                     if (data.summary_filename) {
                         html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary CSV</a></div>';
                     }
-                    if (data.summary_powerbi_filename) {
+                    if (!pbiAssist && data.summary_powerbi_filename) {
                         html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_powerbi_filename) + '" class="btn download-btn" download>Download Power BI CSV</a></div>';
                     }
                     if (data.sharepoint && data.sharepoint.folder_url) {
@@ -462,13 +476,43 @@
                     html += '</div>';
                     status.innerHTML = 'Done.';
                     results.innerHTML = html;
+
+                    if (pbiAssist) {
+                        if (data.summary_powerbi_filename) {
+                            const link = document.createElement('a');
+                            link.href = '/download/' + encodeURIComponent(data.summary_powerbi_filename);
+                            link.download = data.summary_powerbi_filename;
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                        }
+                        if (data.sharepoint && data.sharepoint.folder_url) {
+                            if (pbiTab && !pbiTab.closed) {
+                                pbiTab.location.href = data.sharepoint.folder_url;
+                            } else {
+                                window.open(data.sharepoint.folder_url, '_blank');
+                            }
+                        } else if (pbiTab && !pbiTab.closed) {
+                            pbiTab.close();
+                        }
+                        status.innerHTML = 'Done. Power BI CSV download started and Power BI folder opened.';
+                    }
                 }
             } catch (err) {
                 status.innerHTML = '<span class="error-msg">Error: ' + escapeHtml(err.message) + '</span>';
             }
             runBtn.disabled = false;
+            runPbiBtn.disabled = false;
             runBtn.textContent = 'Run';
+            runPbiBtn.textContent = 'Run to PBI';
             resetProgress();
+        }
+
+        runBtn.addEventListener('click', async () => {
+            await runAutomation(false);
+        });
+        runPbiBtn.addEventListener('click', async () => {
+            await runAutomation(true);
         });
     </script>
 </body>

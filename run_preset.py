@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 import time
@@ -453,10 +454,10 @@ def _wait_for_bandwidth_section(page) -> bool:
     try:
         heading = page.get_by_text(re.compile(r"Bandwidth sizes?", re.IGNORECASE))
         heading.first.wait_for(state="visible", timeout=10000)
-        page.wait_for_timeout(900)  # HICCUP: Let bandwidth options become clickable
+        page.wait_for_timeout(220)  # Faster settle; long waits hurt 1 Gbps path
         return True
     except Exception:
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(200)
         return False
 
 
@@ -588,7 +589,7 @@ def _click_wrapper(page, selector: str, timeout_ms: int = 5000) -> bool:
 
 
 def select_access_and_configuration(page, access_type: str | None, bearer: str | None, bandwidth: str | None, contract_term: str | None = None, pause: bool = False):
-    page.wait_for_timeout(400)  # Slightly shorter: let Configuration section load
+    page.wait_for_timeout(120)  # Speed: shorter config settle
 
     # For 10 Gbps: do bearer FIRST (contract term click can cause re-render that breaks bearer selection)
     b_norm = str(bearer or "").strip().lower() if bearer else ""
@@ -638,9 +639,9 @@ def select_access_and_configuration(page, access_type: str | None, bearer: str |
     if bearer:
         b_key = str(bearer).strip().lower().replace(" ", "")
         b_norm = str(bearer).strip().lower()
-        page.wait_for_timeout(800)  # Bearer section to render
+        page.wait_for_timeout(160)  # Bearer section quick settle
         page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(120)
         if b_norm in ("10 gbps", "10gbps"):
             page.wait_for_timeout(400)
         if pause:
@@ -965,7 +966,7 @@ def select_access_and_configuration(page, access_type: str | None, bearer: str |
                 raise RuntimeError(f"Could not select bearer '{bearer}'. Bandwidth requires bearer first.")
             elif not clicked:
                 print(f"⚠️ Could not click bearer '{bearer}'.")
-        page.wait_for_timeout(1200)  # Let bandwidth options enable after bearer
+        page.wait_for_timeout(250)  # Let bandwidth options enable after bearer
         # Wait for 1 Gbps bandwidth option to become enabled (not disabled)
         if bandwidth and _is_1gbps_bandwidth(bandwidth):
             try:
@@ -979,7 +980,7 @@ def select_access_and_configuration(page, access_type: str | None, bearer: str |
     # Bandwidth: use ID-scoped wrappers (wrapper-bandwidth--100, --1000, etc.) to avoid clicking bearer text
     if bandwidth:
         # Only one clean bandwidth selection; avoid double-click loops that toggle it off/on.
-        page.wait_for_timeout(250)  # Shorter buffer before bandwidth click
+        page.wait_for_timeout(80)  # Shorter buffer before bandwidth click
         w_key = str(bandwidth).strip().lower().replace(" ", "")
         w_norm = str(bandwidth).strip().lower()
         clicked_bw = False
@@ -990,7 +991,7 @@ def select_access_and_configuration(page, access_type: str | None, bearer: str |
                 _select_bandwidth_1gbps(page)
                 clicked_bw = True
             except RuntimeError:
-                page.wait_for_timeout(800)  # One extra wait before falling back to generic locators
+                page.wait_for_timeout(180)  # One extra wait before falling back to generic locators
         elif _is_10gbps_bandwidth(bandwidth):
             try:
                 _select_bandwidth_10gbps(page)
@@ -1028,6 +1029,8 @@ def select_access_and_configuration(page, access_type: str | None, bearer: str |
     print("💰 Clicking Get price...")
     click_get_price_when_enabled(page)
     print("✅ Get price clicked.")
+    # Clear "Updating..." quickly so downstream readiness sees real pricing DOM sooner.
+    _wait_for_updating_overlay_gone(page, timeout_ms=15000)
 
 # ============================
 # RO2 Diversity flow (no shadow VLAN, known postcode e.g. SP2 8NJ)
@@ -1153,41 +1156,128 @@ def do_ro2_diversity_flow(page):
 # ============================
 # Quote page toggles
 # ============================
-def toggle_upfront_charge(page, pay_upfront: bool):
+def toggle_upfront_charge(page, pay_upfront: bool, *, _nested_fallback: bool = False):
     """Select Pay up-front / Pay no up-front. CSV 'Yes' = pay_upfront True = select 'Pay up-front circuit charge'."""
-    # If this product journey has no up-front option, skip immediately (don't wait for wrappers/radios)
+    # Only skip when upfront controls are truly absent.
+    # Do NOT rely on "no up-front charges" text alone; that text can appear as informational copy.
     try:
-        no_upfront = page.get_by_text(re.compile(r"no up-front charges|no up-front charge", re.IGNORECASE))
-        if no_upfront.count() > 0 and no_upfront.first.is_visible(timeout=1500):
-            print("ℹ️ No up-front charges for this journey; skipping upfront toggle.")
-            return
+        has_upfront_controls = (
+            page.locator("#amortise-up-front").count() > 0
+            or page.locator("#amortise-spread-costs").count() > 0
+            or page.locator("#wrapper-amortise-up-front").count() > 0
+            or page.locator("#wrapper-amortise-spread-costs").count() > 0
+        )
+        if not has_upfront_controls:
+            no_upfront = page.get_by_text(re.compile(r"no up-front charges|no up-front charge", re.IGNORECASE))
+            if no_upfront.count() > 0 and no_upfront.first.is_visible(timeout=1500):
+                print("ℹ️ No up-front controls for this journey; skipping upfront toggle.")
+                return
     except Exception:
         pass
     # Scroll to upfront section first (often below fold)
     try:
         section = page.get_by_text(re.compile(r"up-front|upfront|Amounts shown|circuit charge", re.IGNORECASE))
-        if section.first.is_visible(timeout=2000):
-            section.first.scroll_into_view_if_needed(timeout=2000)
-            page.wait_for_timeout(400)
+        if section.first.is_visible(timeout=1200):
+            section.first.scroll_into_view_if_needed(timeout=1500)
+            page.wait_for_timeout(120)
     except Exception:
         pass
 
-    # Staging portal: Pay up-front = #wrapper-amortise-up-front / #amortise-up-front, Pay no up-front = #wrapper-amortise-spread-costs / #amortise-spread-costs
+    # Explicit mapping using your confirmed portal IDs:
+    #   Yes -> #amortise-up-front
+    #   No  -> #amortise-spread-costs
     wrapper_id = "#wrapper-amortise-up-front" if pay_upfront else "#wrapper-amortise-spread-costs"
     radio_id = "#amortise-up-front" if pay_upfront else "#amortise-spread-costs"
+    other_radio_id = "#amortise-spread-costs" if pay_upfront else "#amortise-up-front"
+    wanted_text = "Pay up-front circuit charge" if pay_upfront else "Pay no up-front circuit charge"
+    print(f"🧭 Upfront target from CSV: {'Yes' if pay_upfront else 'No'} -> {wanted_text}")
+
+    # Some supplier/journey combinations disable one of the upfront radios (greyed out).
+    if not _nested_fallback:
+        try:
+            target_disabled = page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    return !!(el && el.disabled);
+                }""",
+                radio_id,
+            )
+            if target_disabled:
+                print(
+                    f"⚠️ Upfront '{wanted_text}' is disabled for this quote. "
+                    f"Selecting the opposite option so the flow can continue."
+                )
+                toggle_upfront_charge(page, not pay_upfront, _nested_fallback=True)
+                return
+        except Exception:
+            pass
+    else:
+        try:
+            if page.evaluate(
+                """(sel) => {
+                    const el = document.querySelector(sel);
+                    return !!(el && el.disabled);
+                }""",
+                radio_id,
+            ):
+                print("⚠️ Alternate upfront choice is also disabled; skipping upfront toggle.")
+                return
+        except Exception:
+            pass
+
+    # First, click the exact wrapper and verify the target radio became checked.
     for sel in [wrapper_id, radio_id]:
         try:
             el = page.locator(sel).first
             el.wait_for(state="attached", timeout=12000)
             el.scroll_into_view_if_needed(timeout=5000)
-            page.wait_for_timeout(400)
-            el.wait_for(state="visible", timeout=5000)
+            page.wait_for_timeout(80)
             el.click(timeout=5000, force=True)
-            page.wait_for_timeout(400)
-            print("✅ Upfront toggle selected (amortise wrapper/radio).")
-            return
+            page.wait_for_timeout(100)
+            target_radio = page.locator(radio_id).first
+            if target_radio.is_checked():
+                print(f"✅ Upfront toggle selected by id: {wanted_text}.")
+                return
         except Exception:
             continue
+
+    # Next, click by exact visible text and verify target radio checked.
+    try:
+        label_loc = page.get_by_text(re.compile(rf"^{re.escape(wanted_text)}$", re.IGNORECASE))
+        if label_loc.count() > 0 and label_loc.first.is_visible(timeout=4000):
+            label_loc.first.scroll_into_view_if_needed(timeout=3000)
+            label_loc.first.click(timeout=5000, force=True)
+            page.wait_for_timeout(100)
+            if page.locator(radio_id).first.is_checked():
+                print(f"✅ Upfront toggle selected by label: {wanted_text}.")
+                return
+    except Exception:
+        pass
+
+    # Final JS fallback: set checked directly and dispatch change/input events.
+    try:
+        js_ok = page.evaluate(
+            """(targetSel, otherSel) => {
+                const target = document.querySelector(targetSel);
+                const other = document.querySelector(otherSel);
+                if (!target) return false;
+                if (other) other.checked = false;
+                target.checked = true;
+                target.dispatchEvent(new Event('input', { bubbles: true }));
+                target.dispatchEvent(new Event('change', { bubbles: true }));
+                const label = target.closest('label');
+                if (label) label.click();
+                return true;
+            }""",
+            radio_id,
+            other_radio_id,
+        )
+        page.wait_for_timeout(120)
+        if js_ok and page.locator(radio_id).first.is_checked():
+            print(f"✅ Upfront toggle selected by JS fallback: {wanted_text}.")
+            return
+    except Exception:
+        pass
 
     # Legacy wrapper IDs (some environments)
     for legacy_id in ["#wrapper-upfront-yes", "#wrapper-upfront-no"]:
@@ -1234,27 +1324,31 @@ def toggle_upfront_charge(page, pay_upfront: bool):
             else:
                 print("ℹ️ Upfront toggle not present here.")
 
-def toggle_fttp_aggregation(page, aggregation_yes: bool):
-    """Set FTTP Aggregation Yes/No. Staging: wrapper-fttp-aggregation-yes/no, data-testid, input id fttp-aggregation-*."""
-    suffix = "yes" if aggregation_yes else "no"
-    label_text = "Yes" if aggregation_yes else "No"
-    input_id = f"#fttp-aggregation-{suffix}"
+def _fttp_input_id(want_yes: bool) -> str:
+    return "#fttp-aggregation-yes" if want_yes else "#fttp-aggregation-no"
 
-    # 0) Try JavaScript click first (works even if element is off-screen or in collapsed section)
+
+def _fttp_target_availability(page, want_yes: bool) -> str:
+    """
+    Inspect the portal's FTTP radio for the requested choice.
+    Returns: 'ok' (present and enabled), 'disabled', or 'missing'.
+    """
+    sel = _fttp_input_id(want_yes)
     try:
-        page.evaluate(f"""() => {{
-            const el = document.querySelector('{input_id}');
-            if (el && !el.checked) {{ el.click(); return true; }}
-            return false;
-        }}""")
-        page.wait_for_timeout(150)
-        if page.locator(input_id).first.is_checked():
-            print(f"✅ FTTP aggregation set: {label_text.upper()} (JS click)")
-            return
+        return page.evaluate(
+            """(s) => {
+                const el = document.querySelector(s);
+                if (!el) return 'missing';
+                if (el.disabled || el.getAttribute('aria-disabled') === 'true') return 'disabled';
+                return 'ok';
+            }""",
+            sel,
+        )
     except Exception:
-        pass
+        return "missing"
 
-    # Scroll to Adjust quote / FTTP section so it's in view (can be below discount fields)
+
+def _scroll_fttp_section_into_view(page) -> None:
     try:
         for hint in ["This connection will be used for FTTP", "FTTP Aggregation", "Adjust quote"]:
             el = page.get_by_text(re.compile(re.escape(hint), re.IGNORECASE))
@@ -1264,12 +1358,54 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool):
                 break
     except Exception:
         pass
-    # Scroll down a bit to reveal content below (FTTP can be under upfront section)
     try:
         page.evaluate("window.scrollBy(0, 400)")
         page.wait_for_timeout(100)
     except Exception:
         pass
+
+
+def toggle_fttp_aggregation(page, aggregation_yes: bool) -> bool:
+    """Set FTTP Aggregation Yes/No. Staging: wrapper-fttp-aggregation-yes/no, data-testid, input id fttp-aggregation-*.
+    Returns True if the requested option appears selected, False if the target control is disabled or could not be set."""
+    suffix = "yes" if aggregation_yes else "no"
+    label_text = "Yes" if aggregation_yes else "No"
+    input_id = f"#fttp-aggregation-{suffix}"
+
+    # Do not click disabled radios (e.g. Sky via Openreach when "Yes" is greyed out) — avoids false positives.
+    avail = _fttp_target_availability(page, aggregation_yes)
+    if avail == "disabled":
+        return False
+
+    # 0) Try JavaScript click first (works even if element is off-screen or in collapsed section)
+    try:
+        page.evaluate(
+            f"""() => {{
+            const el = document.querySelector('{input_id}');
+            if (!el || el.disabled) return false;
+            if (!el.checked) {{ el.click(); return true; }}
+            return true;
+        }}"""
+        )
+        page.wait_for_timeout(150)
+        if page.locator(input_id).count() > 0 and page.locator(input_id).first.is_checked():
+            print(f"✅ FTTP aggregation set: {label_text.upper()} (JS click)")
+            return True
+    except Exception:
+        pass
+
+    _scroll_fttp_section_into_view(page)
+    # Inputs can attach after recalculate / pricing; brief wait then re-check disabled
+    try:
+        page.wait_for_function(
+            "() => document.querySelector('#fttp-aggregation-yes') || document.querySelector('#fttp-aggregation-no')",
+            timeout=4000,
+        )
+    except Exception:
+        pass
+    avail2 = _fttp_target_availability(page, aggregation_yes)
+    if avail2 == "disabled":
+        return False
 
     def _try_select() -> bool:
         """Try to select FTTP option. Returns True if input ends up checked."""
@@ -1318,15 +1454,15 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool):
                 return True
         except Exception:
             pass
-        # 4) JavaScript click on the input (bypasses visibility)
+        # 4) JavaScript click on the input (bypasses visibility) — never on disabled
         try:
             page.evaluate(f"""() => {{
                 const el = document.querySelector('{input_id}');
-                if (el) {{ el.click(); return true; }}
+                if (el && !el.disabled) {{ el.click(); return true; }}
                 return false;
             }}""")
             page.wait_for_timeout(150)
-            if page.locator(input_id).first.is_checked():
+            if page.locator(input_id).count() > 0 and page.locator(input_id).first.is_checked():
                 return True
         except Exception:
             pass
@@ -1335,7 +1471,7 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool):
     for attempt in range(3):
         if _try_select():
             print(f"✅ FTTP aggregation set: {label_text.upper()}")
-            return
+            return True
         page.wait_for_timeout(150)
 
     # Fallback: radio role within section containing "FTTP"
@@ -1346,11 +1482,17 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool):
             page.wait_for_timeout(100)
             radio = section.get_by_role("radio", name=re.compile(label_text, re.IGNORECASE))
             if radio.count() > 0:
-                radio.first.scroll_into_view_if_needed(timeout=2000)
-                radio.first.check(timeout=5000, force=True)
+                r0 = radio.first
+                try:
+                    if not r0.is_enabled():
+                        return False
+                except Exception:
+                    pass
+                r0.scroll_into_view_if_needed(timeout=2000)
+                r0.check(timeout=5000, force=True)
                 page.wait_for_timeout(100)
                 print(f"✅ FTTP aggregation set: {label_text.upper()}")
-                return
+                return True
     except Exception:
         pass
     # Fallback: find any radio with "Yes"/"No" in a parent that contains "FTTP"
@@ -1361,16 +1503,72 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool):
             try:
                 ctx = r.evaluate("el => el.closest('div, section')?.innerText || ''")
                 if ctx and "FTTP" in str(ctx):
+                    try:
+                        if not r.is_enabled():
+                            continue
+                    except Exception:
+                        pass
                     r.scroll_into_view_if_needed(timeout=2000)
                     r.check(timeout=5000, force=True)
                     page.wait_for_timeout(100)
                     print(f"✅ FTTP aggregation set: {label_text.upper()}")
-                    return
+                    return True
             except Exception:
                 continue
     except Exception:
         pass
     print("ℹ️ FTTP aggregation toggle not present or not clickable.")
+    return False
+
+
+def apply_fttp_aggregation_with_fallback(page, want_yes: bool) -> None:
+    """
+    Apply CSV / preset FTTP choice. Some supplier + product combinations disable 'Yes'
+    (e.g. Sky via Openreach). If 'Yes' was requested but is not available, select 'No'
+    and log clearly so the run can continue and order-page FTTP line reflects reality.
+    """
+    if not want_yes:
+        toggle_fttp_aggregation(page, False)
+        return
+
+    _scroll_fttp_section_into_view(page)
+    try:
+        page.wait_for_function(
+            "() => document.querySelector('#fttp-aggregation-yes') || document.querySelector('#fttp-aggregation-no')",
+            timeout=4000,
+        )
+    except Exception:
+        pass
+
+    yes_state = _fttp_target_availability(page, True)
+    if yes_state == "disabled":
+        print(
+            "⚠️ FTTP Aggregation 'Yes' is disabled for this quote (supplier / journey rules). "
+            "CSV asked for Yes — selecting 'No' so the flow can continue. "
+            "Pick another supplier in the CSV if you must test FTTP Yes on this product."
+        )
+        if toggle_fttp_aggregation(page, False):
+            print("✅ FTTP aggregation fallback: NO (Yes unavailable).")
+        else:
+            print("ℹ️ FTTP aggregation fallback: could not confirm 'No' selection.")
+        return
+
+    if toggle_fttp_aggregation(page, True):
+        return
+
+    # Yes not disabled but click paths failed — do not silently fall back unless Yes is still not checked
+    try:
+        y = page.locator("#fttp-aggregation-yes")
+        if y.count() > 0 and y.first.is_checked():
+            return
+    except Exception:
+        pass
+
+    if yes_state == "missing":
+        print("ℹ️ FTTP 'Yes' control not found; portal may omit FTTP for this journey.")
+    else:
+        print("⚠️ Could not set FTTP to Yes; attempting 'No' so Proceed to order can enable.")
+    toggle_fttp_aggregation(page, False)
 
 def adjust_quote_discounts(page, install_discount: str, annual_discount: str) -> None:
     """
@@ -1443,6 +1641,48 @@ def _wait_for_updating_overlay_gone(page, timeout_ms: int = 3000) -> None:
         pass
 
 
+_PRICING_READY_JS = """() => {
+    if (document.querySelector('[data-testid="price-tile"]')) return true;
+    if (document.querySelector('button[data-testid="price-tile"]')) return true;
+    if (document.querySelector('.slick-track [data-testid="price-tile"]')) return true;
+    if (document.querySelector('img.supplier_image')) return true;
+    if (document.querySelector('[class*="supplier_image"]')) return true;
+    if (document.querySelector('#wrapper-amortise-up-front')) return true;
+    if (document.querySelector('#wrapper-amortise-spread-costs')) return true;
+    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+    if (/Amounts shown are representative/i.test(bodyText)) return true;
+    if (/Adjust\\s+quote/i.test(bodyText)) return true;
+    if (/FTTP\\s+Aggregation/i.test(bodyText)) return true;
+    if (/This connection will be used for FTTP/i.test(bodyText)) return true;
+    const buttons = document.querySelectorAll('button');
+    for (const b of buttons) {
+        const text = (b.innerText || '').trim();
+        if (/^Publish(\\s+quote)?$/i.test(text)) return true;
+        if (b.getAttribute('data-testid') === 'proceed to order button') return true;
+        if (/Proceed to order/i.test(text)) return true;
+    }
+    return false;
+}"""
+
+
+def _wait_for_pricing_ui_ready(page, timeout_ms: int) -> None:
+    """
+    After Get price: wait until pricing / quote-adjustment UI is present.
+    Uses wait_for_function with tight in-page polling (avoids slow Python evaluate loops).
+    """
+    _wait_for_updating_overlay_gone(page, timeout_ms=min(timeout_ms, 15000))
+    t0 = time.perf_counter()
+    try:
+        page.wait_for_function(_PRICING_READY_JS, timeout=timeout_ms, polling=75)
+    except PWTimeoutError as e:
+        raise RuntimeError("Pricing UI readiness signals not detected in time.") from e
+    elapsed = time.perf_counter() - t0
+    if elapsed > 0.5:
+        print(f"✅ Pricing UI ready ({elapsed:.1f}s).")
+    else:
+        print("✅ Pricing UI ready.")
+
+
 def _login_internal_neos(page, base_url: str, creds: dict) -> bool:
     """Log in as NEOS internal user. Returns True on success."""
     print("🔐 Logging in as NEOS internal user…")
@@ -1506,6 +1746,111 @@ def _login_internal_neos(page, base_url: str, creds: dict) -> bool:
         pass
     print(f"✅ Logged in as internal user. URL: {page.url}")
     return True
+
+
+def _login_customer_page(page, base_url: str, creds: dict) -> bool:
+    """Log in as customer (username/email + password). Returns True if login succeeded (no longer on /login)."""
+    login_url = base_url.rstrip("/") + "/login"
+    try:
+        page.goto(login_url, wait_until="domcontentloaded", timeout=20000)
+    except Exception:
+        pass
+    if "/login" not in (page.url or ""):
+        return True
+    email = (creds.get("email") or creds.get("username") or "").strip()
+    password = (creds.get("password") or "").strip()
+    if not email or not password:
+        return False
+    try:
+        # Portal login forms vary: try multiple selectors for email/username + password.
+        candidates_email = [
+            page.get_by_label("Email address"),
+            page.get_by_label(re.compile(r"Username|Email", re.IGNORECASE)),
+            page.get_by_label(re.compile(r"email", re.IGNORECASE)),
+            page.get_by_placeholder(re.compile(r"email|username", re.IGNORECASE)),
+            page.locator("input[type='email']"),
+            page.locator("input[name*='email' i]"),
+            page.locator("input[name*='username' i]"),
+        ]
+        email_box = None
+        for c in candidates_email:
+            try:
+                if c.count() > 0 and c.first.is_visible(timeout=2000):
+                    email_box = c.first
+                    break
+            except Exception:
+                continue
+
+        candidates_pass = [
+            page.get_by_label("Password"),
+            page.get_by_placeholder(re.compile(r"password", re.IGNORECASE)),
+            page.locator("input[type='password']"),
+            page.locator("input[name*='password' i]"),
+        ]
+        pass_box = None
+        for c in candidates_pass:
+            try:
+                if c.count() > 0 and c.first.is_visible(timeout=2000):
+                    pass_box = c.first
+                    break
+            except Exception:
+                continue
+
+        # Final fallback: grab the first visible non-password input and the password input.
+        if not email_box:
+            try:
+                fallback_email = page.locator("input[type='email'], input[type='text']").first
+                if fallback_email.count() > 0 and fallback_email.is_visible(timeout=2000):
+                    email_box = fallback_email
+            except Exception:
+                pass
+        if not pass_box:
+            try:
+                fallback_pass = page.locator("input[type='password']").first
+                if fallback_pass.count() > 0 and fallback_pass.is_visible(timeout=2000):
+                    pass_box = fallback_pass
+            except Exception:
+                pass
+
+        if not email_box or not pass_box:
+            print("⚠️ Could not find customer email/password fields on login page.")
+            return False
+
+        email_box.wait_for(state="visible", timeout=8000)
+        pass_box.wait_for(state="visible", timeout=8000)
+        try:
+            email_box.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        try:
+            pass_box.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+
+        email_box.fill(email)
+        pass_box.fill(password)
+        page.wait_for_timeout(300)
+
+        # Try the most likely sign-in buttons.
+        sign_in_btn = page.get_by_role("button", name=re.compile(r"Sign in|Log in|Login", re.IGNORECASE)).first
+        if sign_in_btn.count() == 0:
+            sign_in_btn = page.get_by_role("button", name=re.compile(r"sign in", re.IGNORECASE)).first
+        if sign_in_btn.count() == 0:
+            # Fallback: any visible button that contains "Sign in" text.
+            btns = page.locator("button").filter(has_text=re.compile(r"sign in|log in|login", re.IGNORECASE))
+            if btns.count() > 0:
+                sign_in_btn = btns.first
+        sign_in_btn.click(timeout=5000)
+        try:
+            page.wait_for_url(re.compile(r"/welcome|/orders|/dashboard"), timeout=25000)
+        except Exception:
+            page.wait_for_timeout(3000)
+        if "/login" not in (page.url or ""):
+            print("✅ Logged in as customer.")
+            return True
+    except Exception as e:
+        print(f"ℹ️ Customer login attempt: {e}")
+    return False
 
 
 def _logout_portal(page) -> None:
@@ -1592,11 +1937,11 @@ def publish_and_proceed_to_order(page):
     print("➡️ Clicking Proceed to order...")
     proceed_btn = page.get_by_test_id("proceed to order button")
     try:
-        click_when_enabled(proceed_btn, timeout_ms=30000)  # 30s max; click as soon as enabled
+        click_when_enabled(proceed_btn, timeout_ms=60000)  # 60s for employee flow (FTTP/recalc can be slow)
     except PWTimeoutError:
         fallback = page.get_by_role("button", name=re.compile(r"Proceed to order", re.IGNORECASE))
         if fallback.count() > 0:
-            click_when_enabled(fallback, timeout_ms=20000)
+            click_when_enabled(fallback, timeout_ms=30000)
         else:
             raise
     print("✅ Proceed to order clicked.")
@@ -2409,8 +2754,10 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
     if shadow_vlan_tb.count() == 0:
         shadow_vlan_tb = page.get_by_role("textbox", name=re.compile(r"^Shadow VLAN ID\s*\*$", re.IGNORECASE))
     did_any = False
+    shadow_tb_selected = None
 
     vlan_value = str(billing.get("vlan_id") or "100").strip()
+    shadow_value = str(billing.get("shadow_vlan_id") or "100").strip()
 
     # Wait for primary VLAN input to be visible before any fill (avoids filling a stale/hidden node)
     if vlan_tb.count() > 0:
@@ -2420,10 +2767,10 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
         except Exception:
             pass
 
-    def _fill_vlan_and_verify(tb, value: str) -> bool:
+    def _fill_vlan_and_verify(tb, value: str, *, settle_after_fill_ms: int = 400, settle_after_js_ms: int = 300) -> bool:
         """Fill VLAN input and ensure value sticks (React often needs input/change events)."""
         safe_fill_textbox(tb, value, timeout_ms=10000)
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(settle_after_fill_ms)
         current = (tb.input_value() or "").strip()
         if current == value:
             return True
@@ -2434,89 +2781,151 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
             }""", value)
-            page.wait_for_timeout(300)
+            page.wait_for_timeout(settle_after_js_ms)
             if (tb.input_value() or "").strip() == value:
                 return True
         except Exception:
             pass
         safe_fill_textbox(tb, value, timeout_ms=8000)
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(120)
         return (tb.input_value() or "").strip() == value
 
-    # Fill all VLAN ID fields; RO2 has Primary + Secondary (only fill visible inputs to avoid wrong node)
-    if vlan_tb.count() > 0:
-        for i in range(vlan_tb.count()):
-            try:
-                page.wait_for_timeout(200)
-                tb = vlan_tb.nth(i)
-                try:
-                    if not tb.is_visible(timeout=2000):
-                        continue
-                except Exception:
-                    continue
-                tb.scroll_into_view_if_needed(timeout=5000)
-                print(f"⌨️ Filling VLAN ID * ({i + 1}/{vlan_tb.count()}) with '{vlan_value}'...")
-                _fill_vlan_and_verify(tb, vlan_value)
-                page.wait_for_timeout(300)
+    # Fast path: stable portal IDs (avoids ambiguous side-by-side section locators).
+    _fast_vlan_settle = dict(settle_after_fill_ms=220, settle_after_js_ms=150)
+    primary_done = False
+    shadow_done = False
+    vlan_by_id = page.locator("#aEndLocation_vlanId")
+    try:
+        if vlan_by_id.count() > 0:
+            tb_id = vlan_by_id.first
+            tb_id.wait_for(state="visible", timeout=5000)
+            tb_id.scroll_into_view_if_needed(timeout=3000)
+            print(f"⌨️ Filling VLAN ID * (#aEndLocation_vlanId) with '{vlan_value}'...")
+            if _fill_vlan_and_verify(tb_id, vlan_value, **_fast_vlan_settle):
                 did_any = True
-            except Exception as e:
-                if i == 0:
-                    page.wait_for_timeout(400)
-                else:
-                    print(f"⚠️ Could not fill VLAN ID #{i + 1}: {e}")
-        if did_any:
-            print("✅ VLAN ID(s) filled.")
-        # Retry primary VLAN ID if still empty (non-shadow and last-row runs can be flaky)
-        if vlan_tb.count() > 0:
-            first_vlan = vlan_tb.first
-            for attempt in range(2):  # First retry, then second retry with longer wait
+                primary_done = True
+                print("✅ VLAN ID filled via id (verified).")
+            else:
+                print("⚠️ VLAN ID id-field fill did not verify; will try section/role locators.")
+    except Exception as e:
+        print(f"⚠️ VLAN ID id-field path failed ({e}); using section/role locators.")
+
+    # Keep this simple/stable: fill ONLY the first visible primary VLAN input.
+    # Filling multiple matching inputs can trigger React re-renders that clear values.
+    primary_tb = None
+    if not primary_done and vlan_tb.count() > 0:
+        for i in range(vlan_tb.count()):
+            tb = vlan_tb.nth(i)
+            try:
+                if tb.is_visible(timeout=2000):
+                    primary_tb = tb
+                    break
+            except Exception:
+                continue
+    if not primary_done and primary_tb is not None:
+        try:
+            primary_tb.scroll_into_view_if_needed(timeout=5000)
+            print(f"⌨️ Filling VLAN ID * with '{vlan_value}'...")
+            _fill_vlan_and_verify(primary_tb, vlan_value)
+            did_any = True
+            print("✅ VLAN ID filled (verified).")
+        except Exception as e:
+            print(f"⚠️ Could not fill VLAN ID: {e}")
+    elif not primary_done:
+        print("ℹ️ No visible VLAN ID input found to fill.")
+
+    # RO2: ensure Secondary Circuit VLAN is filled (first fill may leave it empty)
+    if ro2_diversity:
+        sec_vlan = None
+        # Strategy 1: #aEndLocation_edit_secondary_nni scopes to Secondary Circuit NNI section
+        sec_nni = page.locator("#aEndLocation_edit_secondary_nni")
+        if sec_nni.count() > 0:
+            sec_vlan = sec_nni.get_by_label(re.compile(r"VLAN ID", re.IGNORECASE))
+            if sec_vlan.count() == 0:
+                sec_vlan = sec_nni.locator("input[type='text'], input[type='number'], input:not([type])")
+        # Strategy 2: section/div filter fallback
+        if sec_vlan is None or sec_vlan.count() == 0:
+            sec_vlan = (
+                page.locator("section, div")
+                .filter(has_text=re.compile(r"Secondary Circuit", re.IGNORECASE))
+                .filter(has_text=re.compile(r"VLAN Reference", re.IGNORECASE))
+                .locator("input[type='text'], input[type='number'], input:not([type])")
+            )
+        if sec_vlan and sec_vlan.count() > 0:
+            try:
+                tb = sec_vlan.first
+                tb.scroll_into_view_if_needed(timeout=3000)
+                if tb.input_value() != billing["vlan_id"]:
+                    safe_fill_textbox(tb, billing["vlan_id"], timeout_ms=8000)
+                    print("✅ Secondary Circuit VLAN ID filled.")
+                    did_any = True
+            except Exception:
+                pass
+
+    shadow_by_id = page.locator("#aEndLocation_shadowVLANId")
+    try:
+        if not shadow_done and shadow_by_id.count() > 0:
+            stb = shadow_by_id.first
+            stb.wait_for(state="visible", timeout=5000)
+            stb.scroll_into_view_if_needed(timeout=3000)
+            page.wait_for_timeout(80)
+            print(f"⌨️ Filling Shadow VLAN ID * (#aEndLocation_shadowVLANId) with '{shadow_value}'...")
+            ok_id = False
+            for attempt in range(2):
                 try:
-                    if (first_vlan.input_value() or "").strip() != vlan_value:
-                        page.wait_for_timeout(500 if attempt == 0 else 800)
-                        print("🔄 Retrying primary VLAN ID fill (was empty or wrong)...")
-                        first_vlan.scroll_into_view_if_needed(timeout=3000)
-                        first_vlan.click()
-                        page.wait_for_timeout(100)
-                        _fill_vlan_and_verify(first_vlan, vlan_value)
-                        did_any = True
-                    else:
+                    ok_id = bool(_fill_vlan_and_verify(stb, shadow_value, **_fast_vlan_settle))
+                    if ok_id:
                         break
                 except Exception:
-                    if attempt == 0:
-                        page.wait_for_timeout(400)
                     pass
-        # RO2: ensure Secondary Circuit VLAN is filled (first fill may leave it empty)
-        if ro2_diversity:
-            sec_vlan = None
-            # Strategy 1: #aEndLocation_edit_secondary_nni scopes to Secondary Circuit NNI section
-            sec_nni = page.locator("#aEndLocation_edit_secondary_nni")
-            if sec_nni.count() > 0:
-                sec_vlan = sec_nni.get_by_label(re.compile(r"VLAN ID", re.IGNORECASE))
-                if sec_vlan.count() == 0:
-                    sec_vlan = sec_nni.locator("input[type='text'], input[type='number'], input:not([type])")
-            # Strategy 2: section/div filter fallback
-            if sec_vlan is None or sec_vlan.count() == 0:
-                sec_vlan = page.locator("section, div").filter(has_text=re.compile(r"Secondary Circuit", re.IGNORECASE)).filter(has_text=re.compile(r"VLAN Reference", re.IGNORECASE)).locator("input[type='text'], input[type='number'], input:not([type])")
-            if sec_vlan and sec_vlan.count() > 0:
+                page.wait_for_timeout(180)
+            if ok_id:
+                did_any = True
+                shadow_done = True
+                print("✅ Shadow VLAN ID filled via id (verified).")
+            else:
+                print("⚠️ Shadow VLAN ID id-field may not have stuck; will try role locator if present.")
+    except Exception as e:
+        print(f"⚠️ Shadow VLAN ID id-field path failed ({e}); using role locators if present.")
+
+    if not shadow_done and shadow_vlan_tb.count() > 0:
+        # Keep this simple/stable: fill ONLY the first visible shadow VLAN input.
+        shadow_tb_selected = None
+        for i in range(shadow_vlan_tb.count()):
+            cand = shadow_vlan_tb.nth(i)
+            try:
+                if cand.is_visible(timeout=2000):
+                    shadow_tb_selected = cand
+                    break
+            except Exception:
+                continue
+        if shadow_tb_selected is None:
+            shadow_tb_selected = shadow_vlan_tb.first
+        try:
+            shadow_tb_selected.wait_for(state="visible", timeout=8000)
+        except Exception:
+            pass
+
+        page.wait_for_timeout(120)  # small settle before fill
+        try:
+            print(f"⌨️ Filling Shadow VLAN ID * with '{shadow_value}'...")
+            ok = False
+            for attempt in range(2):  # 2 attempts max to handle React timing
                 try:
-                    tb = sec_vlan.first
-                    tb.scroll_into_view_if_needed(timeout=3000)
-                    if tb.input_value() != billing["vlan_id"]:
-                        safe_fill_textbox(tb, billing["vlan_id"], timeout_ms=8000)
-                        print("✅ Secondary Circuit VLAN ID filled.")
-                        did_any = True
+                    ok = bool(_fill_vlan_and_verify(shadow_tb_selected, shadow_value))
+                    if ok:
+                        break
                 except Exception:
                     pass
-    else:
-        print("ℹ️ No VLAN ID field found.")
-
-    if shadow_vlan_tb.count() > 0:
-        page.wait_for_timeout(200)  # Pause before Shadow VLAN fill
-        print(f"⌨️ Filling Shadow VLAN ID * with '{billing['shadow_vlan_id']}'...")
-        safe_fill_textbox(shadow_vlan_tb.first, billing["shadow_vlan_id"])
-        did_any = True
-        print("✅ Shadow VLAN ID filled.")
-    else:
+                page.wait_for_timeout(250)
+            did_any = True
+            if ok:
+                print("✅ Shadow VLAN ID filled (verified).")
+            else:
+                print("⚠️ Shadow VLAN ID filled, but value may not have stuck immediately.")
+        except Exception as e:
+            print(f"⚠️ Could not fill Shadow VLAN ID: {e}")
+    elif not shadow_done:
         print("ℹ️ No Shadow VLAN ID field found.")
 
     if not did_any:
@@ -2530,7 +2939,90 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
         save_btn.first.click()
     else:
         page.get_by_role("button", name=re.compile(r"^Save details$", re.IGNORECASE)).first.click()
-    page.wait_for_timeout(400)
+    page.wait_for_timeout(600)
+
+    # Post-save verification:
+    # The portal sometimes re-renders and clears VLAN inputs after save.
+    # We re-open A-End Edit, verify values, and if needed re-fill + save once.
+    def _get_first_visible_textbox(role_pat) -> any:
+        tbs = a_end_card.get_by_role("textbox", name=role_pat)
+        if tbs.count() == 0:
+            return None
+        for i in range(tbs.count()):
+            cand = tbs.nth(i)
+            try:
+                if cand.is_visible(timeout=2000):
+                    return cand
+            except Exception:
+                continue
+        try:
+            return tbs.first if tbs.first.is_visible(timeout=2000) else None
+        except Exception:
+            return None
+
+    primary_tb_after = None
+    shadow_tb_after = None
+    try:
+        # IMPORTANT: do NOT force-click A-End "Edit" here.
+        # Clicking Edit re-expands the panel and can leave it open, blocking later steps.
+        # Only verify if VLAN inputs are already visible after save.
+        page.wait_for_timeout(200)
+        primary_tb_after = None
+        shadow_tb_after = None
+        try:
+            vid_after = page.locator("#aEndLocation_vlanId")
+            if vid_after.count() > 0 and vid_after.first.is_visible():
+                primary_tb_after = vid_after.first
+        except Exception:
+            pass
+        if primary_tb_after is None:
+            primary_tb_after = _get_first_visible_textbox(re.compile(r"^VLAN ID\s*\*?$", re.IGNORECASE))
+        try:
+            svid_after = page.locator("#aEndLocation_shadowVLANId")
+            if svid_after.count() > 0 and svid_after.first.is_visible():
+                shadow_tb_after = svid_after.first
+        except Exception:
+            pass
+        if shadow_tb_after is None:
+            shadow_tb_after = _get_first_visible_textbox(re.compile(r"^Shadow VLAN ID\s*\*?$", re.IGNORECASE))
+    except Exception:
+        pass
+
+    primary_after_val = ""
+    shadow_after_val = ""
+    try:
+        primary_after_val = (primary_tb_after.input_value() or "").strip() if primary_tb_after else ""
+    except Exception:
+        pass
+    try:
+        shadow_after_val = (shadow_tb_after.input_value() or "").strip() if shadow_tb_after else ""
+    except Exception:
+        pass
+
+    needs_retry = False
+    if primary_tb_after and primary_after_val != vlan_value:
+        needs_retry = True
+    if shadow_tb_after and shadow_after_val != shadow_value:
+        needs_retry = True
+    # If VLAN inputs aren't visible after save, skip verification (don't re-open Edit).
+    if primary_tb_after is None and shadow_tb_after is None:
+        needs_retry = False
+
+    if needs_retry:
+        print(f"⚠️ VLAN inputs not correct after save (primary='{primary_after_val}', shadow='{shadow_after_val}'). Re-fill once…")
+        # Re-fill (only first visible inputs to avoid multi-node React conflicts).
+        if primary_tb_after:
+            _fill_vlan_and_verify(primary_tb_after, vlan_value)
+        if shadow_tb_after:
+            _fill_vlan_and_verify(shadow_tb_after, shadow_value)
+
+        # Save again (wait for button)
+        save_btn2 = a_end_card.get_by_role("button", name=re.compile(r"^Save details$", re.IGNORECASE)).first
+        save_btn2.wait_for(state="visible", timeout=12000)
+        save_btn2.scroll_into_view_if_needed(timeout=5000)
+        save_btn2.click(timeout=10000)
+        page.wait_for_timeout(600)
+
     print("✅ Saved A-End/VLAN details.")
 
 def _find_po_textbox_within_billing_section(billing_section):
@@ -2563,6 +3055,7 @@ def fill_billing_contact_information_section(page, billing: dict):
         has_text=re.compile(r"Billing\s*&\s*contact information", re.IGNORECASE)
     ).first
     safe_wait_visible(billing_section, timeout_ms=20000)
+    billing_section.scroll_into_view_if_needed()
     print("✅ Billing & contact information card found.")
 
     edit_btn = billing_section.get_by_role("button", name=re.compile(r"^Edit", re.IGNORECASE))
@@ -2571,24 +3064,69 @@ def fill_billing_contact_information_section(page, billing: dict):
         edit_btn.first.click()
         page.wait_for_timeout(250)  # Let form expand
 
-    a_end_btns = billing_section.get_by_role("button", name=re.compile(r"^A-End contact$", re.IGNORECASE))
-    if a_end_btns.count() >= 2:
-        print("🟩 Clicking A-End contact buttons...")
-        a_end_btns.first.scroll_into_view_if_needed()
-        a_end_btns.first.click()
-        page.wait_for_timeout(200)
-        a_end_btns.nth(1).scroll_into_view_if_needed()
-        a_end_btns.nth(1).click()
-        page.wait_for_timeout(200)
-        print("✅ A-End contact buttons applied.")
-    else:
-        print("ℹ️ A-End contact buttons not present (ok).")
+    # Click A-End contact once for each contact subsection.
+    # This avoids clicking the wrong button(s) when there are multiple A-End contact controls.
+    def _click_a_end_in_subsection(heading_pattern: re.Pattern, label: str) -> None:
+        try:
+            sub = billing_section.locator("div, section").filter(has_text=heading_pattern).first
+            if sub.count() == 0:
+                print(f"ℹ️ {label}: subsection not found (skipping).")
+                return
+            btns = sub.locator("button, a, [role='button']").filter(
+                has_text=re.compile(r"A-End contact", re.IGNORECASE)
+            )
+            if btns.count() == 0:
+                print(f"ℹ️ {label}: A-End contact button not found (skipping).")
+                return
+            btn = btns.first
+            btn.scroll_into_view_if_needed(timeout=5000)
+            btn.click(timeout=8000)
+            page.wait_for_timeout(400)  # let fields populate before continuing
+            print(f"✅ {label}: A-End contact applied.")
+        except Exception as e:
+            print(f"ℹ️ {label}: could not apply A-End contact ({e}).")
+
+    _click_a_end_in_subsection(re.compile(r"^Order Delivery contact$|Order Delivery contact", re.IGNORECASE), "Order Delivery")
+    _click_a_end_in_subsection(re.compile(r"^Operational contact$|Operational contact", re.IGNORECASE), "Operational")
+
+    # Fill contact fields directly (reliable even if A-End button population is inconsistent).
+    def _fill_if_needed(locator, value: str):
+        try:
+            current = (locator.input_value() or "").strip()
+        except Exception:
+            current = ""
+        if current == str(value).strip():
+            return
+        safe_fill_textbox(locator, value, timeout_ms=12000)
+
+    first_name_tbs = billing_section.get_by_role(
+        "textbox", name=re.compile(r"^First name \*$", re.IGNORECASE)
+    )
+    for i in range(first_name_tbs.count()):
+        _fill_if_needed(first_name_tbs.nth(i), billing["first_name"])
+
+    surname_tbs = billing_section.get_by_role(
+        "textbox", name=re.compile(r"^Surname \*$", re.IGNORECASE)
+    )
+    for i in range(surname_tbs.count()):
+        _fill_if_needed(surname_tbs.nth(i), billing["surname"])
+
+    phone_tbs = billing_section.get_by_role(
+        "textbox", name=re.compile(r"^Mobile or landline phone number \*$", re.IGNORECASE)
+    )
+    for i in range(phone_tbs.count()):
+        _fill_if_needed(phone_tbs.nth(i), billing["phone"])
+
+    email_tbs = billing_section.get_by_role(
+        "textbox", name=re.compile(r"^Email address \*$", re.IGNORECASE)
+    )
+    for i in range(email_tbs.count()):
+        _fill_if_needed(email_tbs.nth(i), billing["email"])
 
     print("⌨️ Filling PO number / Ref * ...")
     po_tb = _find_po_textbox_within_billing_section(billing_section)
     if po_tb is None:
         raise RuntimeError("Could not locate PO number / Ref textbox in Billing & contact information card.")
-
     safe_fill_textbox(po_tb, billing["po_ref"])
     print("✅ PO number / Ref filled.")
 
@@ -2596,147 +3134,301 @@ def fill_billing_contact_information_section(page, billing: dict):
     save_btn = billing_section.get_by_role("button", name=re.compile(r"^Save details$", re.IGNORECASE)).first
     save_btn.scroll_into_view_if_needed()
     save_btn.click()
-    page.wait_for_timeout(150)  # Let save complete
+    page.wait_for_timeout(180)  # Let save complete + propagate to the stored order state
     print("✅ Saved Billing & contact information details.")
 
-def fill_order_billing_screen(page, billing: dict, ro2_diversity: bool = False, b_end_postcode: str | None = None, sc_toggles: dict | None = None, bearer: str = "", bandwidth: str = ""):
+def fill_order_billing_screen(page, billing: dict, ro2_diversity: bool = False, b_end_postcode: str | None = None, sc_toggles: dict | None = None, bearer: str = "", bandwidth: str = "", submit_for_review: bool = True):
     print("🧾 On order page. Filling billing blocks...")
-    page.wait_for_timeout(150)  # Let order page settle
+    page.wait_for_timeout(90)  # Let order page settle
     # RO2 diversity disabled: always pass False to downstream sections
     fill_b_end_section(page, billing, ro2_diversity=False, b_end_postcode=b_end_postcode, sc_toggles=sc_toggles, bearer=bearer, bandwidth=bandwidth)
     fill_a_end_vlan_section(page, billing, ro2_diversity=False)
     fill_billing_contact_information_section(page, billing)
-    submit_order_for_review(page)
-    print("✅ Preset complete (Submit order for review reached).")
+    if submit_for_review:
+        submitted = submit_order_for_review(page)
+        if submitted:
+            print("✅ Preset complete (Submit order for review reached).")
+        else:
+            print("⚠️ Preset finished billing but customer submit for review did not complete — check the browser/order.")
+    else:
+        print("✅ Billing filled (submit for review deferred — e.g. customer will submit in Demo 4).")
 
 
-def submit_order_for_review(page):
+def _order_review_submit_already_done(page) -> bool:
+    """True only when the customer submit step appears finished (not merely the step heading visible)."""
+    for pat in [
+        r"successfully submitted",
+        r"has been submitted for review",
+        r"submitted for review successfully",
+        r"thank you for (submitting|your order)",
+        r"your order has been submitted",
+        r"order (has been )?submitted",
+        r"awaiting review",
+        r"pending review",
+    ]:
+        try:
+            loc = page.get_by_text(re.compile(pat, re.IGNORECASE))
+            if loc.count() > 0 and loc.first.is_visible(timeout=800):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _terms_agreement_checkbox_tick(page) -> bool:
     """
-    Check terms checkbox, click 'Submit for review' / 'Submit order for review', wait for success state.
-    Submit is disabled until the "Agree to General terms and Ethernet terms" checkbox is checked.
+    Tick the mandatory 'Agree to General terms and Ethernet terms…' checkbox (React-friendly).
+    Returns True if any strategy leaves a matching checkbox checked.
     """
-    print("🟧 Submitting order for review...")
-    page.wait_for_timeout(200)
     try:
-        terms_section = page.get_by_text(re.compile(r"Supplementary Terms|Agree to General terms", re.IGNORECASE))
+        terms_section = page.get_by_text(re.compile(r"Supplementary Terms|Agree to General terms|Ethernet terms", re.IGNORECASE))
         if terms_section.count() > 0:
             terms_section.first.scroll_into_view_if_needed(timeout=2000)
-            page.wait_for_timeout(150)
+            page.wait_for_timeout(60)
     except Exception:
         pass
-    # 1) Check the "Agree to General terms and Ethernet terms" checkbox (required before Submit is enabled)
-    terms_checked = False
-    try:
-        page.locator("#terms-checkbox").first.wait_for(state="attached", timeout=5000)
-        page.wait_for_timeout(150)
-    except Exception:
-        pass
-    for attempt in range(5):
+
+    def _any_terms_checkbox_checked() -> bool:
         try:
-            if attempt == 0:
-                cb = page.locator("#terms-checkbox")
-            elif attempt == 1:
-                cb = page.get_by_role("checkbox", name=re.compile(r"Agree to General terms", re.IGNORECASE))
-            elif attempt == 2:
-                cb = page.get_by_label(re.compile(r"Agree to General terms", re.IGNORECASE))
-            elif attempt == 3:
-                section = page.locator(".form-check, [class*='form-check']").filter(has_text=re.compile(r"Agree to General terms", re.IGNORECASE))
-                cb = section.locator("input[type='checkbox']")
-            else:
-                # Last resort: click label text (often toggles the checkbox)
-                label = page.get_by_text(re.compile(r"Agree to General terms and Ethernet terms", re.IGNORECASE))
-                if label.count() > 0:
-                    label.first.scroll_into_view_if_needed(timeout=2000)
-                    label.first.click(timeout=2000, force=True)
-                    page.wait_for_timeout(250)
-                    terms_checked = True
-                    print("✅ Terms checkbox checked (via label click).")
-                break
-            if cb.count() > 0 and not terms_checked:
-                el = cb.first
-                el.scroll_into_view_if_needed(timeout=2000)
-                page.wait_for_timeout(100)
-                if el.is_checked():
-                    terms_checked = True
-                    print("✅ Terms checkbox already checked.")
-                    break
-                el.check(timeout=4000, force=True)
-                page.wait_for_timeout(250)
-                if el.is_checked():
-                    terms_checked = True
-                    print("✅ Terms checkbox checked.")
-                    break
+            return bool(
+                page.evaluate("""() => {
+                    const termsRe = /Agree to General terms|Ethernet terms|Supplementary Terms|shall incorporate/i;
+                    const cbs = document.querySelectorAll('input[type="checkbox"]');
+                    for (const cb of cbs) {
+                        let p = cb.parentElement;
+                        for (let i = 0; p && i < 14; i++, p = p.parentElement) {
+                            const ctx = (p.innerText || '').slice(0, 2500);
+                            if (termsRe.test(ctx)) {
+                                if (cb.checked) return true;
+                                break;
+                            }
+                        }
+                    }
+                    const t = document.querySelector('#terms-checkbox');
+                    return !!(t && t.checked);
+                }""")
+            )
         except Exception:
-            pass
-    if not terms_checked:
+            return False
+
+    def _js_tick_terms_checkbox() -> bool:
         try:
-            clicked = page.evaluate("""() => {
+            did = page.evaluate("""() => {
+                const fire = (el) => {
+                    el.checked = true;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.click();
+                };
                 let cb = document.querySelector('#terms-checkbox');
-                if (!cb) {
-                    const divs = document.querySelectorAll('.form-check, [class*="form-check"]');
-                    for (const d of divs) {
-                        if (d.textContent.includes('Agree to General terms')) {
-                            cb = d.querySelector('input[type="checkbox"]');
-                            break;
+                if (cb && !cb.checked) { fire(cb); return true; }
+                for (const lab of document.querySelectorAll('label')) {
+                    if (/Agree to General terms|Ethernet terms/i.test(lab.innerText || '')) {
+                        const inp = lab.querySelector('input[type="checkbox"]');
+                        const id = lab.getAttribute('for');
+                        const byId = id && document.getElementById(id);
+                        const target = inp || (byId && byId.matches && byId.matches('input[type=checkbox]') ? byId : null);
+                        if (target && !target.checked) { fire(target); return true; }
+                    }
+                }
+                const termsRe = /Agree to General terms|Ethernet terms|Supplementary Terms|shall incorporate/i;
+                for (const el of document.querySelectorAll('input[type="checkbox"]')) {
+                    let p = el.parentElement;
+                    for (let i = 0; p && i < 14; i++, p = p.parentElement) {
+                        if (termsRe.test((p.innerText || '').slice(0, 2500)) && !el.checked) {
+                            fire(el);
+                            return true;
                         }
                     }
                 }
-                if (cb && !cb.checked) { cb.click(); return true; }
                 return false;
             }""")
-            page.wait_for_timeout(250)
-            if clicked:
-                terms_checked = True
-                print("✅ Terms checkbox checked (via JS).")
+            page.wait_for_timeout(120)
+            return bool(did)
         except Exception:
-            pass
-    if not terms_checked:
-        print("ℹ️ Terms checkbox not found or could not check; will try Submit anyway.")
-    try:
-        submit_btn = page.locator("button.submitOrder--btn").first
-        submit_btn.wait_for(state="visible", timeout=6000)
-        expect(submit_btn).to_be_enabled(timeout=8000)
-        page.wait_for_timeout(150)
-    except Exception:
+            return False
+
+    # 0) JS first — fastest for React and avoids slow Playwright retries when #terms-checkbox id differs
+    if _js_tick_terms_checkbox() and _any_terms_checkbox_checked():
+        return True
+
+    # 1) Playwright locators (id, role, label, form-check, visible text)
+    strategies = [
+        lambda: page.locator("#terms-checkbox"),
+        lambda: page.get_by_role("checkbox", name=re.compile(r"Agree to General terms|Ethernet terms", re.IGNORECASE)),
+        lambda: page.get_by_label(re.compile(r"Agree to General terms|Ethernet terms", re.IGNORECASE)),
+        lambda: page.locator(".form-check, [class*='form-check']").filter(
+            has_text=re.compile(r"Agree to General terms", re.IGNORECASE)
+        ).locator("input[type='checkbox']"),
+        lambda: page.locator("label").filter(has_text=re.compile(r"Agree to General terms", re.IGNORECASE)),
+    ]
+    for get_loc in strategies:
         try:
-            submit_btn = page.get_by_role("button", name=re.compile(r"Submit for review", re.IGNORECASE)).first
-            submit_btn.wait_for(state="visible", timeout=4000)
-            expect(submit_btn).to_be_enabled(timeout=8000)
-            page.wait_for_timeout(150)
+            cb = get_loc()
+            if cb.count() == 0:
+                continue
+            el = cb.first
+            el.scroll_into_view_if_needed(timeout=3000)
+            page.wait_for_timeout(80)
+            tag = el.evaluate("n => n.tagName")
+            if str(tag).upper() == "LABEL":
+                el.click(timeout=4000, force=True)
+            else:
+                if el.is_checked():
+                    return True
+                el.check(timeout=5000, force=True)
+            page.wait_for_timeout(200)
+            if _any_terms_checkbox_checked():
+                return True
         except Exception:
-            pass
-    # 2) Click Submit button (multiple locators for different layouts)
-    try:
-        submit_clicked = False
+            continue
+
+    # 2) Click long label text (portal often binds click to the paragraph, not the input)
+    for text_pat in [
+        r"Agree to General terms and Ethernet terms",
+        r"Agree to General terms",
+        r"General terms and Ethernet terms",
+        r"Supplementary Terms and Conditions",
+    ]:
+        try:
+            tloc = page.get_by_text(re.compile(text_pat, re.IGNORECASE))
+            if tloc.count() > 0:
+                tloc.first.scroll_into_view_if_needed(timeout=3000)
+                tloc.first.click(timeout=4000, force=True)
+                page.wait_for_timeout(200)
+                if _any_terms_checkbox_checked():
+                    return True
+        except Exception:
+            continue
+
+    # 3) JS again (after Playwright attempts)
+    if _js_tick_terms_checkbox() and _any_terms_checkbox_checked():
+        return True
+
+    return _any_terms_checkbox_checked()
+
+
+def _wait_submit_for_review_enabled(page, timeout_ms: int = 12000) -> bool:
+    deadline = time.perf_counter() + timeout_ms / 1000.0
+    while time.perf_counter() < deadline:
         for loc in [
             page.locator("button.submitOrder--btn"),
+            page.get_by_role("button", name=re.compile(r"^Submit for review$", re.IGNORECASE)),
             page.get_by_role("button", name=re.compile(r"Submit for review", re.IGNORECASE)),
-            page.get_by_role("button", name=re.compile(r"Submit order for review", re.IGNORECASE)),
-            page.get_by_role("link", name=re.compile(r"Submit for review", re.IGNORECASE)),
-            page.get_by_role("link", name=re.compile(r"Submit order for review", re.IGNORECASE)),
-            page.locator("button, a, [role='button']").filter(has_text=re.compile(r"Submit for review", re.IGNORECASE)),
-            page.locator("button, a, [role='button']").filter(has_text=re.compile(r"Submit order for review", re.IGNORECASE)),
         ]:
-            if loc.count() > 0 and loc.first.is_visible(timeout=1500):
-                try:
-                    expect(loc.first).to_be_enabled(timeout=4000)
-                except Exception:
-                    pass
-                loc.first.scroll_into_view_if_needed()
-                loc.first.click(timeout=8000)
-                page.wait_for_timeout(200)
+            try:
+                if loc.count() == 0:
+                    continue
+                b = loc.first
+                if not b.is_visible(timeout=350):
+                    continue
+                if b.is_enabled():
+                    return True
+            except Exception:
+                continue
+        page.wait_for_timeout(100)
+    return False
+
+
+def _submit_for_review_button_locators(page):
+    return [
+        page.locator("button.submitOrder--btn"),
+        page.get_by_role("button", name=re.compile(r"^Submit for review$", re.IGNORECASE)),
+        page.get_by_role("button", name=re.compile(r"Submit for review", re.IGNORECASE)),
+        page.get_by_role("button", name=re.compile(r"Submit order for review", re.IGNORECASE)),
+        page.get_by_role("link", name=re.compile(r"Submit for review", re.IGNORECASE)),
+        page.get_by_role("link", name=re.compile(r"Submit order for review", re.IGNORECASE)),
+        page.locator("button, a, [role='button']").filter(has_text=re.compile(r"^Submit for review$", re.IGNORECASE)),
+    ]
+
+
+def submit_order_for_review(page) -> bool:
+    """
+    Check terms checkbox, click 'Submit for review', wait for real post-submit UI.
+    IMPORTANT: The step title on the order page is also 'Submit order for review' — that is NOT success;
+    we must tick terms first or the submit button stays disabled.
+    """
+    print("🟧 Submitting order for review...")
+    page.wait_for_timeout(80)
+
+    if _order_review_submit_already_done(page):
+        print("✅ Order already appears submitted for review (success message present).")
+        return True
+
+    terms_ok = _terms_agreement_checkbox_tick(page)
+    if terms_ok:
+        print("✅ Terms agreement checkbox is checked.")
+    else:
+        print("⚠️ Could not confirm terms checkbox; waiting for Submit to enable anyway…")
+
+    if not _wait_submit_for_review_enabled(page, timeout_ms=10000):
+        print("⚠️ 'Submit for review' did not become enabled — terms may not be ticked or UI changed.")
+        # One more aggressive pass: re-tick + short wait
+        _terms_agreement_checkbox_tick(page)
+        page.wait_for_timeout(200)
+        if not _wait_submit_for_review_enabled(page, timeout_ms=5000):
+            return False
+
+    submit_clicked = False
+    try:
+        for loc in _submit_for_review_button_locators(page):
+            try:
+                if loc.count() == 0:
+                    continue
+                btn = loc.first
+                if not btn.is_visible(timeout=1500):
+                    continue
+                expect(btn).to_be_enabled(timeout=4000)
+                btn.scroll_into_view_if_needed()
+                btn.click(timeout=8000)
+                page.wait_for_timeout(180)
                 submit_clicked = True
                 break
-        if not submit_clicked:
-            print("⚠️ Submit button not found; checking if already on success page...")
+            except Exception:
+                continue
     except Exception as e:
-        print(f"⚠️ Could not click Submit button: {e}. Checking if already on success page...")
+        print(f"⚠️ Could not click Submit for review: {e}")
+
+    if not submit_clicked:
+        print("⚠️ Submit for review button not clicked.")
+        return bool(_order_review_submit_already_done(page))
+
+    # Real success: confirmation copy and/or submit control gone or disabled after navigation/update
+    page.wait_for_timeout(200)
+    if _order_review_submit_already_done(page):
+        print("✅ Order submitted for review (success text detected).")
+        return True
+
     try:
-        page.get_by_text(re.compile(r"Submit order for review", re.IGNORECASE)).first.wait_for(state="visible", timeout=10000)
-        print("✅ Submit order for review reached.")
-        page.wait_for_timeout(200)
+        page.wait_for_function(
+            """() => {
+                const body = document.body && document.body.innerText ? document.body.innerText : '';
+                if (/successfully submitted|has been submitted for review|thank you for submitting|your order has been submitted|awaiting review|pending review/i.test(body))
+                    return true;
+                const btns = [...document.querySelectorAll('button')];
+                const still = btns.some(b => {
+                    const t = (b.innerText || '').trim();
+                    if (!/^Submit for review$/i.test(t) && !/Submit for review/i.test(t)) return false;
+                    return b.offsetParent !== null && !b.disabled;
+                });
+                return !still;
+            }""",
+            timeout=12000,
+        )
+        print("✅ Order submitted for review (submit control cleared or success text detected).")
+        return True
     except Exception:
-        print("ℹ️ Submit order page may have different layout; continuing.")
+        pass
+
+    if _order_review_submit_already_done(page):
+        return True
+
+    print("⚠️ Submit was clicked but post-submit state was not confirmed within the timeout.")
+    page.wait_for_timeout(1200)
+    if _order_review_submit_already_done(page):
+        print("✅ Order submitted for review (late success text).")
+        return True
+    return False
 
 # ============================
 # Location step: find postcode input (multiple strategies)
@@ -2805,6 +3497,20 @@ def start_product_journey(page, base_url: str):
         print("ℹ️ No 'Start a quote' — going to /quotes/new (Product journey).")
         page.goto(f"{base_url}/quotes/new", wait_until="domcontentloaded")
 
+def _extract_basket_id_from_page(page) -> str:
+    """Extract Basket Id from current order page (same pattern as run_csv_regression)."""
+    try:
+        body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
+        m = re.search(r"Basket\s*I[Dd]:\s*([0-9]+)", body, re.IGNORECASE)
+        if not m:
+            m = re.search(r"Basket\s*I[Dd]\s*([0-9]+)", body, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
+
+
 # ============================
 # Demo 3 / Demo 4 runner (internal creates quote → adjust → customer submits → internal places; Demo 4 captures Basket ID)
 # ============================
@@ -2831,7 +3537,9 @@ def run_preset_demo3_demo4(
         raise RuntimeError("Demo 3/4 require neos_internal credentials in config.json.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, slow_mo=0 if headless else 80)
+        _sm_d = os.environ.get("P2NNI_PLAYWRIGHT_SLOW_MO", "").strip()
+        slow_mo_d = 0 if headless else (int(_sm_d) if _sm_d.isdigit() else 35)
+        browser = p.chromium.launch(headless=headless, slow_mo=slow_mo_d)
         context = browser.new_context()
         page = context.new_page()
         page.set_default_timeout(5000)
@@ -2846,24 +3554,25 @@ def run_preset_demo3_demo4(
 
         start_product_journey(page, base_url)
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
+            # Speed: don't block long on networkidle here; product tile can be clickable before full idle.
+            page.wait_for_load_state("networkidle", timeout=2500)
         except Exception:
             pass
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(80)
 
         tile = page.get_by_text(q["product_tile"])
-        tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=6000)
+        tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=2500)
         if not tile_visible:
-            page.wait_for_timeout(400)
-            tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=4000)
+            page.wait_for_timeout(120)
+            tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=1200)
         if tile_visible:
             print(f"🖱 Selecting product: {q['product_tile']}")
             safe_click(tile)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(150)
             next_btn = page.get_by_role("button", name=re.compile(r"^Next$", re.IGNORECASE))
-            if next_btn.count() > 0 and next_btn.first.is_visible(timeout=5000):
+            if next_btn.count() > 0 and next_btn.first.is_visible(timeout=2000):
                 next_btn.first.click(timeout=5000)
-                page.wait_for_timeout(350)
+                page.wait_for_timeout(120)
             print("✅ Product selected.")
         else:
             print("ℹ️ Product tile not visible — may already be on location step.")
@@ -2915,23 +3624,13 @@ def run_preset_demo3_demo4(
             contract_term=q.get("contract_term"), pause=False,
         )
 
-        # Same as Demo 1/2: wait for quote to be ready (Publish or Proceed to order visible) before selecting supplier.
-        # Then supplier → upfront → adjust quote → FTTP → publish uses the same short waits as Demo 1.
+        # Same as Demo 1/2: wait for pricing UI (in-browser polling).
         bearer_lower = str(q.get("bearer", "") or "").lower().replace(" ", "")
         is_10g = bearer_lower in ("10gbps", "10 gbps")
-        timeout_ms = 150000 if is_10g else 120000
+        timeout_ms = 60000 if is_10g else 20000
         try:
-            print("⏳ Waiting for Publish or Proceed to order...")
-            page.wait_for_function("""() => {
-                const buttons = document.querySelectorAll('button');
-                for (const b of buttons) {
-                    const text = (b.innerText || '').trim();
-                    if (/^Publish(\\s+quote)?$/i.test(text)) return true;
-                    if (b.getAttribute('data-testid') === 'proceed to order button') return true;
-                    if (/Proceed to order/i.test(text)) return true;
-                }
-                return false;
-            }""", timeout=timeout_ms)
+            print("⏳ Waiting for pricing UI…")
+            _wait_for_pricing_ui_ready(page, timeout_ms=timeout_ms)
         except Exception as e:
             context.close()
             browser.close()
@@ -3036,10 +3735,10 @@ def run_preset_demo3_demo4(
                 except Exception:
                     pass
             tiles = page.get_by_test_id("price-tile")
-            n = min(tiles.count(), 20)
+            n = min(tiles.count(), 8)  # speed: limit supplier scan
             for i in range(n):
                 try:
-                    txt = tiles.nth(i).inner_text(timeout=2000) or ""
+                    txt = tiles.nth(i).inner_text(timeout=500) or ""
                     start_supplier = _extract_provider(txt)
                     if start_supplier:
                         break
@@ -3047,7 +3746,7 @@ def run_preset_demo3_demo4(
                     continue
             if not start_supplier and n >= 1:
                 try:
-                    start_supplier = _extract_provider(tiles.first.inner_text(timeout=2000) or "")
+                    start_supplier = _extract_provider(tiles.first.inner_text(timeout=500) or "")
                 except Exception:
                     pass
         except Exception:
@@ -3083,36 +3782,14 @@ def run_preset_demo3_demo4(
         adjust_quote_discounts(page, f"{install_discount:.2f}".rstrip("0").rstrip("."), f"{annual_discount:.2f}".rstrip("0").rstrip("."))
         page.wait_for_timeout(50)
 
-        # FTTP: minimal waits
-        fttp_yes = q.get("fttp_aggregation", False)
-        fttp_wrapper = "#wrapper-fttp-aggregation-yes" if fttp_yes else "#wrapper-fttp-aggregation-no"
-        inp_sel = "#fttp-aggregation-yes" if fttp_yes else "#fttp-aggregation-no"
-        fttp_set = False
-        try:
-            if page.locator(inp_sel).count() > 0:
-                page.locator(inp_sel).first.wait_for(state="attached", timeout=2000)
-                page.evaluate(f"""() => {{
-                    const el = document.querySelector('{inp_sel}');
-                    if (el && !el.checked) {{ el.click(); return true; }}
-                    return false;
-                }}""")
-                page.wait_for_timeout(50)
-                if page.locator(inp_sel).first.is_checked():
-                    print(f"✅ FTTP aggregation set: {'YES' if fttp_yes else 'NO'} (JS)")
-                    fttp_set = True
-        except Exception:
-            pass
-        if not fttp_set:
-            try:
-                page.locator(fttp_wrapper).first.wait_for(state="attached", timeout=2000)
-                page.locator(fttp_wrapper).first.scroll_into_view_if_needed(timeout=1000)
-                toggle_fttp_aggregation(page, fttp_yes)
-                page.wait_for_timeout(50)
-            except Exception:
-                pass
+        # FTTP: use same robust flow as main preset (Demo 1/2) so "Proceed to order" enables reliably
+        page.wait_for_timeout(200)  # Let discount recalc settle before FTTP
+        apply_fttp_aggregation_with_fallback(page, q.get("fttp_aggregation", False))
+        page.wait_for_timeout(300)
 
-        # Gap 2 (FTTP → Publish): overlay gone (max 3s) then publish immediately
-        _wait_for_updating_overlay_gone(page, timeout_ms=3000)
+        # Gap 2 (FTTP → Publish): wait for overlay gone and allow time for button to enable
+        _wait_for_updating_overlay_gone(page, timeout_ms=5000)
+        page.wait_for_timeout(1500)  # Let Proceed to order become enabled after FTTP
         publish_and_proceed_to_order(page)
 
         # Wait for orders URL
@@ -3125,31 +3802,172 @@ def run_preset_demo3_demo4(
             print(f"⚠️ Not confidently detected order page yet. Current URL: {page.url}")
             page.wait_for_timeout(500)
 
-        # Internal user: fill billing blocks and submit order for review (same-session internal flow).
-        fill_order_billing_screen(
-            page,
-            billing,
-            ro2_diversity=q.get("ro2_diversity", False),
-            b_end_postcode=q.get("b_end_postcode"),
-            sc_toggles=preset.get("site_config"),
-            bearer=q.get("bearer", ""),
-            bandwidth=q.get("bandwidth", ""),
-        )
-
-        # Order ID from URL (e.g. .../orders/abc-123)
+        # Order ID and URL up front (needed for Demo 4 customer → internal flow)
         order_id = ""
         url = page.url or ""
         match = re.search(r"/orders/([^/?]+)", url)
         if match:
             order_id = match.group(1).strip()
+        order_url_out = (base_url.rstrip("/") + "/orders/" + order_id) if order_id else (url or "")
 
-        # Let order page update after submit
-        page.wait_for_timeout(1200)
+        if capture_basket_id:
+            # ---------- Demo 4: internal fills billing only → customer submits for review → internal places order → poll Basket ID ----------
+            fill_order_billing_screen(
+                page,
+                billing,
+                ro2_diversity=q.get("ro2_diversity", False),
+                b_end_postcode=q.get("b_end_postcode"),
+                sc_toggles=preset.get("site_config"),
+                bearer=q.get("bearer", ""),
+                bandwidth=q.get("bandwidth", ""),
+                submit_for_review=False,
+            )
 
-        # Capture order/quote refs and scrape pricing + B-End provider from order page (no extra navigation)
+            # 4. Change to Customer: do a true session switch like Demo 2.
+            # This avoids "customer step is still internal" when `auth.json` is stale/wrong.
+            print("🔄 Switching to Customer (fresh session) to submit order for review…")
+            try:
+                context.close()
+            except Exception:
+                pass
+
+            cust_context = browser.new_context()
+            cust_page = cust_context.new_page()
+            cust_page.set_default_timeout(10000)
+            customer_submitted_ok = False
+            try:
+                cust_creds = get_customer_creds() if get_customer_creds else None
+                # Always start at /login to ensure we have the correct identity for submitting for review.
+                cust_page.goto(base_url.rstrip("/") + "/login", wait_until="domcontentloaded", timeout=60000)
+                if cust_creds:
+                    login_ok = _login_customer_page(cust_page, base_url, cust_creds)
+                    if login_ok:
+                        try:
+                            cust_context.storage_state(path=str(AUTH_STATE_PATH))
+                        except Exception:
+                            pass
+                    else:
+                        print("⚠️ Customer auto-login failed; waiting for manual login...")
+
+                if "/login" in (cust_page.url or ""):
+                    print("⏳ Waiting for manual customer login (leave /login to continue)…")
+                    for _ in range(150):  # ~5 minutes
+                        cust_page.wait_for_timeout(2000)
+                        if "/login" not in (cust_page.url or ""):
+                            break
+                    else:
+                        print("⚠️ Customer login timed out — cannot submit for review.")
+
+                    # Save session for next run (auth.json) if user logged in successfully.
+                    if "/login" not in (cust_page.url or ""):
+                        try:
+                            cust_context.storage_state(path=str(AUTH_STATE_PATH))
+                        except Exception:
+                            pass
+
+                # Now that we are logged in as customer, go to the order URL.
+                cust_page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+
+                # 5. Submitted order for review (with customer permissions)
+                if "/login" not in (cust_page.url or ""):
+                    ok = submit_order_for_review(cust_page)
+                    if ok:
+                        customer_submitted_ok = True
+                        print("✅ Customer submitted order for review.")
+                    else:
+                        print("⚠️ Customer submission for review did not complete (Submit not clicked / success not detected).")
+                else:
+                    print("⚠️ Still on /login; skipping customer submit.")
+            except Exception as e:
+                print(f"⚠️ Customer submit step failed: {e}")
+            finally:
+                cust_context.close()
+
+            if not customer_submitted_ok:
+                raise RuntimeError("Demo 4: customer submission for review did not complete; refusing to place order as internal user.")
+
+            # 6. Change back to Neos internal user: re-login internal to place order.
+            print("🔄 Switching back to internal user to place order…")
+            context = browser.new_context()
+            page = context.new_page()
+            page.set_default_timeout(5000)
+            if not _login_internal_neos(page, base_url, creds):
+                context.close()
+                browser.close()
+                raise RuntimeError("Internal login failed after customer submit (Demo 4).")
+
+            page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(1500)
+            # 7. Place order and press OK
+            try:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+            try:
+                btn = page.locator("button.accept-btn").first
+                try:
+                    btn.wait_for(state="visible", timeout=60000)
+                except Exception:
+                    btn = page.get_by_role("button", name=re.compile(r"Place order", re.IGNORECASE)).first
+                    btn.wait_for(state="visible", timeout=60000)
+                print("🟧 Clicking 'Place order' as internal user…")
+                btn.scroll_into_view_if_needed(timeout=5000)
+                try:
+                    expect(btn).to_be_enabled(timeout=20000)
+                except Exception:
+                    pass
+                btn.click(timeout=30000)
+                try:
+                    page.get_by_text(re.compile(r"Order Accepted", re.IGNORECASE)).first.wait_for(state="visible", timeout=30000)
+                except Exception:
+                    pass
+                ok_btn = page.get_by_role("button", name=re.compile(r"^OK$", re.IGNORECASE))
+                if ok_btn.count() > 0:
+                    ok_btn.first.scroll_into_view_if_needed(timeout=5000)
+                    ok_btn.first.click(timeout=30000)
+                    print("✅ Order Accepted dialog confirmed.")
+                page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                print(f"⚠️ Place order / OK failed: {e}")
+            # 8. Reload order url and wait, scrape every 5s for Basket ID (~90s total)
+            basket_id = ""
+            refresh_interval_ms = 5000
+            max_attempts = 18
+            print("⏳ Waiting for Basket Id (refreshing every 5s, up to ~90s)…")
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if attempt == 1 or attempt % 3 == 0:
+                        print(f"  ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
+                    page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(refresh_interval_ms)
+                    basket_id = _extract_basket_id_from_page(page)
+                    if basket_id:
+                        print(f"✅ BasketId captured: {basket_id}")
+                        break
+                except Exception as e:
+                    print(f"  ℹ️ Poll attempt {attempt}: {e}")
+                    continue
+            if not basket_id:
+                print("⚠️ Basket Id not found within timeout.")
+        else:
+            # ---------- Demo 3: internal fills billing and submits for review (no customer switch, no Place order) ----------
+            fill_order_billing_screen(
+                page,
+                billing,
+                ro2_diversity=q.get("ro2_diversity", False),
+                b_end_postcode=q.get("b_end_postcode"),
+                sc_toggles=preset.get("site_config"),
+                bearer=q.get("bearer", ""),
+                bandwidth=q.get("bandwidth", ""),
+                submit_for_review=True,
+            )
+            basket_id = ""
+            page.wait_for_timeout(1200)
+
+        # Capture order/quote refs and scrape pricing + B-End provider from order page
         order_number = ""
         quote_number = ""
-        order_url_out = (base_url.rstrip("/") + "/orders/" + order_id) if order_id else (url or "")
         quote_url_out = ""
         quotation_num = ""
         line_id = ""
@@ -3158,23 +3976,21 @@ def run_preset_demo3_demo4(
         annual_rental = ""
         ftpp_aggregation = ""
         add_on = ""
-        basket_id = ""
-
         try:
             body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
             body = str(body)
-            om = re.search(r"Order\\s+(O-[a-f0-9]+)", body, re.IGNORECASE)
+            om = re.search(r"Order\s+(O-[a-f0-9]+)", body, re.IGNORECASE)
             if om:
                 order_number = om.group(1).strip()
             elif order_id:
                 order_number = "O-" + order_id[:8] if len(order_id) >= 8 else "O-" + order_id
-            install_m = re.search(r"Install\\s*£\\s*([0-9,]+\\.\\d{2})", body, re.IGNORECASE)
+            install_m = re.search(r"Install\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
             if install_m:
                 install_price = install_m.group(1).replace(",", "")
-            annual_m = re.search(r"Annual\\s*£\\s*([0-9,]+\\.\\d{2})", body, re.IGNORECASE)
+            annual_m = re.search(r"Annual\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
             if annual_m:
                 annual_rental = annual_m.group(1).replace(",", "")
-            fttp_m = re.search(r"FTTP\\s+Aggregation\\s*£\\s*([0-9,]+\\.\\d{2})", body, re.IGNORECASE)
+            fttp_m = re.search(r"FTTP\s+Aggregation\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
             if fttp_m:
                 ftpp_aggregation = fttp_m.group(1).replace(",", "")
             quote_links = page.locator("a[href*='/quotes/']").filter(has_text=re.compile(r"Q-|From quote", re.IGNORECASE))
@@ -3238,8 +4054,10 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
         print(f"📍 Postcode override: {q['b_end_postcode']}")
 
     with sync_playwright() as p:
-        # slow_mo=0 for headless (faster); 80ms for visible (debugging)
-        browser = p.chromium.launch(headless=headless, slow_mo=0 if headless else 80)
+        # slow_mo=0 for headless; light delay when headful (Demo 2 visible) — was 80ms, now ~35ms to cut ~30–40s/run.
+        _sm = os.environ.get("P2NNI_PLAYWRIGHT_SLOW_MO", "").strip()
+        slow_mo = 0 if headless else (int(_sm) if _sm.isdigit() else 35)
+        browser = p.chromium.launch(headless=headless, slow_mo=slow_mo)
         context_kwargs = {}
         if AUTH_STATE_PATH.exists():
             context_kwargs["storage_state"] = str(AUTH_STATE_PATH)
@@ -3256,25 +4074,26 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
 
         start_product_journey(page, base_url)
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
+            # Speed: don't block long on networkidle here; product tile can be clickable before full idle.
+            page.wait_for_load_state("networkidle", timeout=2500)
         except Exception:
             pass
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(80)
 
         # Product tile step: select product then Next → location step (Product journey)
         tile = page.get_by_text(q["product_tile"])
-        tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=6000)
+        tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=2500)
         if not tile_visible:
-            page.wait_for_timeout(400)
-            tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=4000)
+            page.wait_for_timeout(120)
+            tile_visible = tile.count() > 0 and tile.first.is_visible(timeout=1200)
         if tile_visible:
             print(f"🖱 Selecting product: {q['product_tile']}")
             safe_click(tile)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(150)
             next_btn = page.get_by_role("button", name=re.compile(r"^Next$", re.IGNORECASE))
-            if next_btn.count() > 0 and next_btn.first.is_visible(timeout=5000):
+            if next_btn.count() > 0 and next_btn.first.is_visible(timeout=2000):
                 next_btn.first.click(timeout=5000)
-                page.wait_for_timeout(350)
+                page.wait_for_timeout(120)
             print("✅ Product selected.")
         else:
             print("ℹ️ Product tile not visible — may already be on location step.")
@@ -3294,7 +4113,7 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
         postcode_tb = find_postcode_input(page)
         safe_fill(postcode_tb, q["b_end_postcode"], timeout=25000)
         safe_click(page.get_by_role("button", name=re.compile(r"^Find$", re.IGNORECASE)), timeout=35000)
-        page.wait_for_timeout(3000)  # Let address + NNI section load (first row often needs longer cold start)
+        page.wait_for_timeout(1700)  # Let address + NNI load (was 3s; trim for Demo 1/2 speed)
 
         # Cap at 5s - was 2.5s but NNI click needs more time to be stable
         page.set_default_timeout(5000)
@@ -3337,26 +4156,16 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
             pause=pause,
         )
 
-        # Wait for pricing to complete: employee flow shows "Publish", customer flow goes straight to "Proceed to order"
-        # Wait for either button so both login types work.
+        # Wait for pricing UI (in-browser polling — faster than Python evaluate loops).
         bearer_lower = str(q.get("bearer", "") or "").lower().replace(" ", "")
         is_10g = bearer_lower in ("10gbps", "10 gbps")
-        timeout_ms = 150000 if is_10g else 120000  # 2.5 min for 10 Gbps
+        timeout_ms = 60000 if is_10g else 20000
         try:
-            print("⏳ Waiting for Publish or Proceed to order (up to 2.5 min for 10 Gbps)...")
-            page.wait_for_function("""() => {
-                const buttons = document.querySelectorAll('button');
-                for (const b of buttons) {
-                    const text = (b.innerText || '').trim();
-                    if (/^Publish(\\s+quote)?$/i.test(text)) return true;
-                    if (b.getAttribute('data-testid') === 'proceed to order button') return true;
-                    if (/Proceed to order/i.test(text)) return true;
-                }
-                return false;
-            }""", timeout=timeout_ms)
+            print("⏳ Waiting for pricing UI…")
+            _wait_for_pricing_ui_ready(page, timeout_ms=timeout_ms)
         except Exception as e:
             raise RuntimeError(
-                f"Neither Publish nor Proceed to order appeared within {'2.5' if is_10g else '2'} minutes. "
+                f"Pricing UI did not become ready within {'60s' if is_10g else '20s'}. "
                 f"Bearer/bandwidth selection may have failed, or pricing is slow. Check bearer '{q.get('bearer')}' and postcode '{q.get('b_end_postcode')}'. {e}"
             ) from e
 
@@ -3497,7 +4306,7 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
                     print(f"ℹ️ Error while trying to select preferred supplier '{preferred_supplier}'; falling back to default tile. {e}")
 
             tiles = page.get_by_test_id("price-tile")
-            n = min(tiles.count(), 20)
+            n = min(tiles.count(), 8)  # speed: limit supplier scan
 
             for i in range(n):
                 t = tiles.nth(i)
@@ -3524,14 +4333,14 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
                         return false;
                     }""")
                     if has_green and not start_supplier:
-                        txt = t.inner_text(timeout=2000) or ""
+                        txt = t.inner_text(timeout=500) or ""
                         start_supplier = _extract_provider_from_text(txt)
                         if start_supplier:
                             break
                 except Exception:
                     continue
             if not start_supplier and n >= 1:
-                txt = tiles.first.inner_text(timeout=2000) or ""
+                txt = tiles.first.inner_text(timeout=500) or ""
                 start_supplier = _extract_provider_from_text(txt)
         except Exception:
             pass
@@ -3539,7 +4348,7 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
         # CSV Yes = pay upfront; portal "Pay up-front circuit charge" = pay. If portal shows opposite, invert.
         toggle_upfront_charge(page, q.get("pay_upfront", True))
         page.wait_for_timeout(50)  # Minimal pause before FTTP
-        toggle_fttp_aggregation(page, q.get("fttp_aggregation", False))
+        apply_fttp_aggregation_with_fallback(page, q.get("fttp_aggregation", False))
         publish_and_proceed_to_order(page)
 
         # Wait for orders URL

@@ -258,8 +258,17 @@ def run():
 
         # Run the automation (verbose so terminal shows where it fails; no browser popup)
         mode = request.form.get("mode", "demo1")
+        show_browser = request.form.get("show_browser") == "1"
+        # Control browser visibility per demo via env vars consumed by run_csv_regression/run_preset.
         if mode == "demo1":
-            os.environ["P2NNI_DEMO1_HEADLESS"] = "0" if request.form.get("show_browser") == "1" else "1"
+            os.environ["P2NNI_DEMO1_HEADLESS"] = "0" if show_browser else "1"
+        elif mode == "demo2":
+            os.environ["P2NNI_DEMO2_HEADLESS"] = "0" if show_browser else "1"
+            # Demo 2 has TWO separate browser phases (customer + internal NEOS).
+            # If the user asked to "Show browser", also make the internal phase visible so they can watch it.
+            os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
+        elif mode in ("demo3", "demo4"):
+            os.environ["P2NNI_DEMO34_HEADLESS"] = "0" if show_browser else "1"
         exit_code, results, summary_path, summary_path_powerbi = run_csv_regression(
             tmp_path,
             quiet=False,

@@ -47,3 +47,27 @@ def get_neos_internal_creds() -> Optional[dict]:
     if email and password:
         return {"email": email, "password": password}
     return None
+
+
+def get_customer_creds() -> Optional[dict]:
+    """
+    Customer / approved purchaser login (Demo 4: submit order for review).
+
+    Same shape as neos_internal. Use this when you want Demo 4 to log in as
+    customer automatically instead of using a pre-saved auth.json session.
+
+    config.json:
+    {
+      "customer": {
+        "email": "customer@example.com",
+        "password": "secret"
+      }
+    }
+    """
+    data = _load_config()
+    cust = data.get("customer") or {}
+    email = (cust.get("email") or "").strip()
+    password = (cust.get("password") or "").strip()
+    if email and password:
+        return {"email": email, "password": password}
+    return None
