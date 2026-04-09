@@ -1,0 +1,11 @@
+{
+  "portal_url": "https://staging.digital-foundations.co.uk",
+  "neos_internal": {
+    "email": "your-internal-user@example.com",
+    "password": "CHANGE_ME"
+  },
+  "customer": {
+    "email": "your-customer-user@example.com",
+    "password": "CHANGE_ME"
+  }
+}

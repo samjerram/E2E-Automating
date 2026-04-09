@@ -299,6 +299,22 @@ def _build_preset_from_row(row: dict, billing_defaults: dict, row_index: int) ->
         "list_annual": _get_cell(row, "list annual"),
         "list_install": _get_cell(row, "list install"),
     }
+    shadow_required = _yes_no(
+        _get_cell(row, "shadow vlan required") or _get_cell(row, "shadow vlan required?"),
+        True,
+    )
+    vlan_main = _cell(row, ["vlan id"], billing_defaults, "vlan_id", "100")
+    vlan_tagging_yes = _yes_no(_cell(row, ["vlan tagging"], billing_defaults, "vlan_tagging"), False)
+    vt_explicit = (_get_cell(row, "vlan tagging value") or "").strip()
+    if not vlan_tagging_yes:
+        vlan_tagging_value = "N/A"
+    else:
+        vlan_tagging_value = vt_explicit if vt_explicit else str(vlan_main).strip()
+
+    shadow_vlan_id_val = ""
+    if shadow_required:
+        shadow_vlan_id_val = _cell(row, ["shadow vlan id"], billing_defaults, "shadow_vlan_id", "100")
+
     billing = {
         "end_company": _cell(row, ["company name", "end company name"], billing_defaults, "end_company", "Test Co"),
         "first_name": _cell(row, ["contact first name", "first name"], billing_defaults, "first_name", "Test"),
@@ -306,8 +322,9 @@ def _build_preset_from_row(row: dict, billing_defaults: dict, row_index: int) ->
         "phone": _cell(row, ["phone", "mobile or landline phone number"], billing_defaults, "phone", "07123456789"),
         "email": _cell(row, ["email", "email address"], billing_defaults, "email", "test@example.com"),
         "rack_id": _cell(row, ["rack id"], billing_defaults, "rack_id", "1"),
-        "vlan_id": _cell(row, ["vlan id"], billing_defaults, "vlan_id", "100"),
-        "shadow_vlan_id": _cell(row, ["shadow vlan id"], billing_defaults, "shadow_vlan_id", "100"),
+        "vlan_id": vlan_main,
+        "vlan_tagging_value": vlan_tagging_value,
+        "shadow_vlan_id": shadow_vlan_id_val,
         "po_ref": _cell(row, ["po reference", "po ref"], billing_defaults, "po_ref", "TEST-PO-001"),
         "floor": _cell(row, ["floor"], billing_defaults, "floor", "001 - 1st Floor"),
         "room": _cell(row, ["room"], billing_defaults, "room", "ADMN - Admin Room"),
@@ -326,8 +343,20 @@ def _build_preset_from_row(row: dict, billing_defaults: dict, row_index: int) ->
         mt = "SR"
     else:
         mt = "LR" if mt != "TX" else "TX"
+    try:
+        from p2nni_constraints import get_allowed_options
+
+        allowed_mt = (get_allowed_options(bearer_b, bandwidth_str) or {}).get("media_type") or []
+        if allowed_mt and mt not in allowed_mt:
+            if "TX" in allowed_mt:
+                mt = "TX"
+            else:
+                mt = allowed_mt[0]
+    except Exception:
+        pass
     an_raw = _cell(row, ["access notice"], billing_defaults, "access_notice", "0-48 hours")
     access_notice = "Over 48 hours" if an_raw and "over" in an_raw.lower() else "0-48 hours"
+    building_prior = _yes_no(_cell(row, ["building built prior 2000"], billing_defaults, "building_built_prior_2000"), False)
     base["site_config"] = {
         "connector_type": ct,
         "power_supply": ps,
@@ -337,8 +366,12 @@ def _build_preset_from_row(row: dict, billing_defaults: dict, row_index: int) ->
         "auto_negotiation": _yes_no(_cell(row, ["auto negotiation"], billing_defaults, "auto_negotiation"), True),
         "hazards_on_site": _yes_no(_cell(row, ["hazards on site"], billing_defaults, "hazards_on_site"), True),
         "hazards_description": _cell(row, ["hazards description"], billing_defaults, "hazards_description", "Standard building hazards – site survey recommended prior to engineer visit.") or "Standard building hazards – site survey recommended prior to engineer visit.",
-        "building_built_prior_2000": _yes_no(_cell(row, ["building built prior 2000"], billing_defaults, "building_built_prior_2000"), False),
-        "asbestos_register": _yes_no(_cell(row, ["asbestos register"], billing_defaults, "asbestos_register"), False),
+        "building_built_prior_2000": building_prior,
+        "asbestos_register": (
+            _yes_no(_cell(row, ["asbestos register"], billing_defaults, "asbestos_register"), False)
+            if building_prior
+            else False
+        ),
         "more_than_one_tenant": _yes_no(_cell(row, ["more than one tenant"], billing_defaults, "more_than_one_tenant"), False),
         "land_owner_permission_required": _yes_no(_cell(row, ["land owner permission required"], billing_defaults, "land_owner_permission_required"), False),
     }
@@ -402,7 +435,19 @@ def validate_csv(path: Path) -> tuple[list[dict], list[str]]:
                         "email": _d("email") or _d("email address"),
                         "rack_id": _d("rack id"),
                         "vlan_id": _d("vlan id"),
-                        "shadow_vlan_id": _d("shadow vlan id"),
+                        "vlan_tagging_value": (
+                            "N/A"
+                            if not _yes_no((_d("vlan tagging") or "").strip(), False)
+                            else (
+                                (_d("vlan tagging value") or "").strip()
+                                or (_d("vlan id") or "").strip()
+                            )
+                        ),
+                        "shadow_vlan_id": (
+                            _d("shadow vlan id")
+                            if _yes_no(_d("shadow vlan required") or _d("shadow vlan required?"), True)
+                            else ""
+                        ),
                         "po_ref": _d("po reference") or _d("po ref"),
                         "floor": _d("floor"),
                         "room": _d("room"),
@@ -519,10 +564,11 @@ def _run_preset_in_process_impl(
 def _run_preset_demo34_impl(
     preset_path: Path,
     postcode_override: str | None,
+    internal_place_order_after_customer: bool,
     capture_basket_id: bool,
     suppress_output: bool,
 ) -> tuple[int, float, str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
-    """Runs Demo 3/4 flow; returns 17 elements (same 16 as run_preset + basket_id)."""
+    """Runs Demo 3/4/5 flow; returns 17 elements (same 16 as run_preset + basket_id)."""
     import contextlib
     import io
     import os
@@ -543,6 +589,7 @@ def _run_preset_demo34_impl(
             ret = run_preset_demo3_demo4(
                 preset_path,
                 postcode_override,
+                internal_place_order_after_customer=internal_place_order_after_customer,
                 capture_basket_id=capture_basket_id,
                 headless=headless_flag,
             )
@@ -673,7 +720,7 @@ SUMMARY_CSV_BASE_HEADERS = [
 def _summary_headers_for_mode(mode: str) -> list[str]:
     m = (mode or "").strip().lower()
     headers = list(SUMMARY_CSV_BASE_HEADERS)
-    if m in ("demo3", "demo4"):
+    if m in ("demo3", "demo4", "demo5"):
         insert_at = headers.index("Quote")
         headers[insert_at:insert_at] = [
             "NegotiatedAnnual",
@@ -681,7 +728,7 @@ def _summary_headers_for_mode(mode: str) -> list[str]:
             "ListAnnual",
             "ListInstall",
         ]
-    if m in ("demo2", "demo4"):
+    if m in ("demo2", "demo5"):
         insert_at = headers.index("Result")
         headers.insert(insert_at, "BasketId")
     return headers
@@ -958,24 +1005,28 @@ def print_summary(
 
 
 def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> None:
-    """For Demo 2: log in as internal NEOS user and capture BasketId for each successful order."""
-    if mode != "demo2":
+    """For Demo 1/2: log in as internal NEOS user and place orders. Demo 2 also captures BasketId."""
+    m = str(mode or "").strip().lower()
+    if m not in ("demo1", "demo2"):
         return
     if not results:
         return
     creds = get_neos_internal_creds()
     if not creds:
-        print("ℹ️ Demo 2 requested but neos_internal credentials are missing in config.json — skipping BasketId collection.")
+        print(f"ℹ️ {m.upper()} requested but neos_internal credentials are missing in config.json — skipping internal place-order step.")
         return
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError, expect  # type: ignore
     except Exception:
-        print("ℹ️ Demo 2 requested but Playwright is not available in this environment — skipping BasketId collection.")
+        print(f"ℹ️ {m.upper()} requested but Playwright is not available in this environment — skipping internal place-order step.")
         return
 
     base_url = get_portal_base_url().rstrip("/")
     print("\n" + "=" * 60)
-    print("  DEMO 2: Internal login to capture BasketId")
+    if m == "demo2":
+        print("  DEMO 2: Internal login to place order + capture BasketId")
+    else:
+        print("  DEMO 1: Internal login to place order (no BasketId polling)")
     print("=" * 60)
 
     # For Demo 2 we keep the internal NEOS browser headless by default.
@@ -1083,15 +1134,16 @@ def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> N
                 print(f"  ⚠️ Could not open order URL {r.order_url}: {e}")
                 continue
 
-            # If BasketId already present, capture and continue
-            try:
-                initial_basket = _extract_basket_id_from_page(page)
-            except Exception:
-                initial_basket = ""
-            if initial_basket:
-                r.basket_id = initial_basket
-                print(f"  ✅ BasketId already present: {r.basket_id}")
-                continue
+            if m == "demo2":
+                # If BasketId already present, capture and continue
+                try:
+                    initial_basket = _extract_basket_id_from_page(page)
+                except Exception:
+                    initial_basket = ""
+                if initial_basket:
+                    r.basket_id = initial_basket
+                    print(f"  ✅ BasketId already present: {r.basket_id}")
+                    continue
 
             # FULLY AUTOMATED: click "Place order" and "OK" as NEOS internal user.
             did_click_place = False
@@ -1152,28 +1204,31 @@ def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> N
                 print(f"  ⚠️ Error while trying to click 'Place order' / 'OK': {e}")
                 did_click_place = False
 
-            # Poll for Basket Id: faster interval, similar total window (Demo 2 & 4).
-            print("  ⏳ Waiting for Basket Id to appear (refreshing every ~3.2s, up to ~80s)…")
-            basket_id = ""
-            refresh_interval_ms = 3200
-            max_attempts = 25  # ~80s total
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    if attempt == 1 or attempt % 3 == 0:
-                        print(f"    ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
-                    page.goto(r.order_url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(refresh_interval_ms)  # 5s between refreshes
-                    basket_id = _extract_basket_id_from_page(page)
-                    if basket_id:
-                        break
-                except Exception as e:
-                    print(f"    ℹ️ Error while polling for Basket Id on attempt {attempt}: {e}")
-                    continue
-            if basket_id:
-                r.basket_id = basket_id
-                print(f"  ✅ BasketId captured: {basket_id}")
+            if m == "demo2":
+                # Poll for Basket Id: faster interval, similar total window (Demo 2 & 4).
+                print("  ⏳ Waiting for Basket Id to appear (refreshing every ~3.2s, up to ~80s)…")
+                basket_id = ""
+                refresh_interval_ms = 3200
+                max_attempts = 25  # ~80s total
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        if attempt == 1 or attempt % 3 == 0:
+                            print(f"    ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
+                        page.goto(r.order_url, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(refresh_interval_ms)
+                        basket_id = _extract_basket_id_from_page(page)
+                        if basket_id:
+                            break
+                    except Exception as e:
+                        print(f"    ℹ️ Error while polling for Basket Id on attempt {attempt}: {e}")
+                        continue
+                if basket_id:
+                    r.basket_id = basket_id
+                    print(f"  ✅ BasketId captured: {basket_id}")
+                else:
+                    print("  ⚠️ Basket Id not found within timeout; leaving BasketId blank for this row.")
             else:
-                print("  ⚠️ Basket Id not found within timeout; leaving BasketId blank for this row.")
+                print("  ✅ Demo 1 internal place-order step complete (BasketId polling skipped).")
 
         context.close()
         browser.close()
@@ -1261,15 +1316,16 @@ def run_csv_regression(
             temp_paths.append(preset_path)
         else:
             preset_path = row["preset_path"]
-        use_demo34 = mode in ("demo3", "demo4")
+        use_demo345 = mode in ("demo3", "demo4", "demo5")
         try:
-            if use_demo34:
+            if use_demo345:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
                         _run_preset_demo34_impl,
                         preset_path,
                         row["postcode"],
-                        capture_basket_id=(mode == "demo4"),
+                        internal_place_order_after_customer=(mode in ("demo4", "demo5")),
+                        capture_basket_id=(mode == "demo5"),
                         suppress_output=suppress_output,
                     )
                     ret = future.result(timeout=PRESET_TIMEOUT_SEC)
@@ -1277,7 +1333,7 @@ def run_csv_regression(
                 ret = run_preset(preset_path, row["postcode"], headless=headless, suppress_output=suppress_output)
         except Exception as e:
             ret = (1, 0.0, str(e)[:500], "", "", "", "", "", "", "", "", "", "", "", "", "")
-            if use_demo34:
+            if use_demo345:
                 ret = ret + ("",)  # 17th element basket_id
         code = ret[0] if ret else 1
         duration = ret[1] if len(ret) > 1 else 0.0
@@ -1298,7 +1354,7 @@ def run_csv_regression(
         basket_id_from_run = (ret[16] or "") if len(ret) > 16 else ""
         # Retry once on bearer selection failure or Publish timeout (10 Gbps first row often fails due to cold-start)
         retry_triggers = ("Could not select bearer", "Publish button did not appear")
-        if code != 0 and stderr_snippet and any(t in stderr_snippet for t in retry_triggers) and not use_demo34:
+        if code != 0 and stderr_snippet and any(t in stderr_snippet for t in retry_triggers) and not use_demo345:
             if verbose:
                 print(f"  Retrying {row['preset_id']} (bearer selection flake)...")
             time.sleep(2)
@@ -1435,7 +1491,7 @@ def run_csv_regression(
     # The UI currently keys off `exit_code`/`result` to show green/red.
     # For modes that request BasketId capture, we must fail the row if BasketId isn't captured.
     demo_mode = str(mode).strip().lower()
-    require_basket_id = demo_mode in ("demo2", "demo4")
+    require_basket_id = demo_mode in ("demo2", "demo5")
     if require_basket_id:
         for r in results:
             if r.exit_code == 0 and not (getattr(r, "basket_id", "") or "").strip():

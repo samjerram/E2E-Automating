@@ -7,14 +7,16 @@ We support two template variants:
   - Demo 3/4 (internal adjust quote): includes negotiated annual/install + list annual/install
 
 Columns with dropdowns: Product Type, B-End Port, Bandwidth, Term Length,
-Pay Upfront, Shadow VLAN, FTTP Aggregation, Floor, Room,
-Connector Type, Power Supply, Media Type, VLAN Tagging, Access Notice,
-Auto Negotiation, Hazards on Site, Building Built Prior 2000, Asbestos Register,
+Shadow VLAN Required, Pay Upfront, FTTP Aggregation, Floor, Room,
+Connector Type, Power Supply, Media Type, VLAN Tagging, VLAN Tagging Value, Access Notice,
+Auto Negotiation, Hazards on Site, Building Built Prior 2000, Asbestos Register (Yes/No or N/A only — see Instructions),
 More Than One Tenant, Land Owner Permission Required.
 
 Columns that stay free text (customer fills in): B-End Postcode, Company Name,
 Contact First Name, Contact Surname, Phone, Email, Rack ID, VLAN ID,
-Shadow VLAN ID, PO Reference, Hazards Description.
+PO Reference, Hazards Description.
+VLAN Tagging Value is a dropdown: N/A when VLAN Tagging is No; when Yes, same VLAN ID list (1–4094) as Shadow VLAN ID.
+(Shadow VLAN ID uses a dropdown: N/A if Shadow VLAN Required is No, else VLAN 1–4094.)
 
 IMPORTANT: Connector Type, Media Type, Auto Negotiation options depend on
 Bearer (B-End Port) and Bandwidth. See the "Constraints" sheet for rules.
@@ -43,13 +45,13 @@ OUTPUT_XLSX_DEMO34 = BASE / "P2NNI_CSV_Template_Demo34.xlsx"
 # Headers: order matches digital portal UI (Floor, Room, Rack ID; site config + readiness; then VLAN IDs; PO Ref last)
 HEADERS_FULL = [
     "Product Type", "B-End Postcode", "B-End Port (Mbps)", "Bandwidth (Mbps)",
-    "Term Length (months)", "Pay Upfront", "Shadow VLAN Required", "FTTP Aggregation",
+    "Term Length (months)", "Shadow VLAN Required", "Pay Upfront", "FTTP Aggregation",
     "Preferred Supplier",
     "Negotiated Annual", "Negotiated Install",
     "List Annual", "List Install",
     "Company Name", "Contact First Name", "Contact Surname",
     "Phone", "Email", "Floor", "Room", "Rack ID",
-    "Connector Type", "Power Supply", "Media Type", "VLAN Tagging",
+    "Connector Type", "Power Supply", "Media Type", "VLAN Tagging", "VLAN Tagging Value",
     "Access Notice", "Auto Negotiation", "Hazards on Site", "Hazards Description",
     "Building Built Prior 2000", "Asbestos Register", "More Than One Tenant",
     "Land Owner Permission Required", "VLAN ID", "Shadow VLAN ID", "PO Reference",
@@ -63,8 +65,8 @@ EXAMPLE_ROW_FULL = [
     "", "",  # List Annual, List Install (optional; if blank, scraped from quote page for discount)
     "Test Co", "Test", "User", "07123456789", "test@example.com",
     "001 - 1st Floor", "ADMN - Admin Room", "1",
-    "LC", "AC", "LR", "No", "0-48 hours", "Yes", "Yes", "Standard building hazards",
-    "No", "No", "No", "No", "100", "100", "TEST-PO-001",
+    "LC", "AC", "LR", "No", "N/A", "0-48 hours", "Yes", "Yes", "Standard building hazards",
+    "No", "N/A", "No", "No", "100", "100", "TEST-PO-001",
 ]
 
 NEGOTIATED_LIST_COLS = {"Negotiated Annual", "Negotiated Install", "List Annual", "List Install"}
@@ -124,7 +126,16 @@ def create_template(demo_mode: str = "demo34"):
     inst.cell(row=11, column=1, value="  • 1 Gbps bearer → Bandwidth: 1000, 500, 200, or 100")
     inst.cell(row=12, column=1, value="  • 100 Mbps bearer → Bandwidth: 100 only")
     inst.cell(row=13, column=1, value="Connector, Media, Auto Negotiation, etc. then depend on Bearer+Bandwidth — see Constraints sheet.")
-    inst.cell(row=14, column=1, value="")
+    inst.cell(
+        row=14,
+        column=1,
+        value=(
+            "VLAN Tagging Value: when \"VLAN Tagging\" is No, the dropdown is N/A only; when Yes, choose a B-End tag (1–4094), or leave blank to reuse \"VLAN ID\" in CSV/automation. "
+            "If Shadow VLAN Required = No, the Shadow VLAN ID dropdown is N/A only; if Yes, choose a VLAN ID (1–4094). "
+            "Automation applies N/A on the portal when shadow is not required or VLAN tagging is off. "
+            "If Building Pre-2000 = No, the Asbestos Register dropdown is N/A only (Excel enforces this per row)."
+        ),
+    )
     if include_negotiated:
         inst.cell(
             row=15,
@@ -278,6 +289,8 @@ def create_template(demo_mode: str = "demo34"):
             continue  # Handled separately with INDIRECT
         if col_name == "Bandwidth (Mbps)" and bandwidth_dynamic:
             continue  # Handled by DynBandwidth INDIRECT
+        if col_name == "Asbestos Register":
+            continue  # Depends on Building Built Prior 2000 — INDIRECT + named ranges below
         opts_col += 1
         col_letter = get_column_letter(opts_col)
         for r, o in enumerate(opts, start=1):
@@ -351,6 +364,98 @@ def create_template(demo_mode: str = "demo34"):
             ws.add_data_validation(dv)
             main_col = get_column_letter(col_idx)
             dv.add(f"{main_col}2:{main_col}200")
+
+    # Shared Options! cell for "N/A" lists (asbestos + shadow VLAN ID when not required)
+    ref_na_shared = None  # Options! single cell for "N/A" (asbestos and/or shadow VLAN ID)
+
+    # Asbestos Register: Building Built Prior 2000 = No → dropdown only N/A; = Yes → Yes or No
+    b_prior_idx = col_map.get("Building Built Prior 2000")
+    asb_idx = col_map.get("Asbestos Register")
+    if b_prior_idx and asb_idx:
+        opts_col += 1
+        c_yes_no = get_column_letter(opts_col)
+        opts_ws.cell(row=1, column=opts_col, value="Yes")
+        opts_ws.cell(row=2, column=opts_col, value="No")
+        opts_col += 1
+        c_na = get_column_letter(opts_col)
+        opts_ws.cell(row=1, column=opts_col, value="N/A")
+        ref_yes_no = f"'{opts_sheet_name}'!${c_yes_no}$1:${c_yes_no}$2"
+        ref_na_only = f"'{opts_sheet_name}'!${c_na}$1:${c_na}$1"
+        wb.defined_names["Asbestos_When_Pre2000"] = DefinedName(
+            "Asbestos_When_Pre2000", attr_text=ref_yes_no
+        )
+        wb.defined_names["Asbestos_NA_Only"] = DefinedName("Asbestos_NA_Only", attr_text=ref_na_only)
+        ref_na_shared = ref_na_only
+        bp_letter = get_column_letter(b_prior_idx)
+        asb_letter = get_column_letter(asb_idx)
+        for row in range(2, 201):
+            formula = f'=INDIRECT(IF({bp_letter}{row}="No","Asbestos_NA_Only","Asbestos_When_Pre2000"))'
+            dv = DataValidation(type="list", formula1=formula, allow_blank=True, showDropDown=False)
+            dv.error = (
+                'When "Building Built Prior 2000" is No, Asbestos Register must be N/A. '
+                "When Yes, choose Yes or No."
+            )
+            dv.errorTitle = "Invalid entry"
+            ws.add_data_validation(dv)
+            dv.add(f"{asb_letter}{row}")
+
+    # Shadow VLAN ID: Shadow VLAN Required = No → N/A only; = Yes → VLAN IDs 1–4094 (portal range)
+    sreq_idx = col_map.get("Shadow VLAN Required")
+    svid_idx = col_map.get("Shadow VLAN ID")
+    if sreq_idx and svid_idx:
+        if ref_na_shared is None:
+            opts_col += 1
+            c_na_sv = get_column_letter(opts_col)
+            opts_ws.cell(row=1, column=opts_col, value="N/A")
+            ref_na_shared = f"'{opts_sheet_name}'!${c_na_sv}$1:${c_na_sv}$1"
+        wb.defined_names["ShadowVlanId_NA_Only"] = DefinedName(
+            "ShadowVlanId_NA_Only", attr_text=ref_na_shared
+        )
+        svl = wb.create_sheet("ShadowVlanIdList")
+        svl.sheet_state = "hidden"
+        for i in range(1, 4095):
+            svl.cell(row=i, column=1, value=i)
+        ref_vlan_ids = "'ShadowVlanIdList'!$A$1:$A$4094"
+        wb.defined_names["ShadowVlanId_WhenRequired"] = DefinedName(
+            "ShadowVlanId_WhenRequired", attr_text=ref_vlan_ids
+        )
+        sreq_letter = get_column_letter(sreq_idx)
+        svid_letter = get_column_letter(svid_idx)
+        for row in range(2, 201):
+            formula = f'=INDIRECT(IF({sreq_letter}{row}="No","ShadowVlanId_NA_Only","ShadowVlanId_WhenRequired"))'
+            dv = DataValidation(type="list", formula1=formula, allow_blank=True, showDropDown=False)
+            dv.error = (
+                'When "Shadow VLAN Required" is No, Shadow VLAN ID must be N/A. '
+                "When Yes, pick a VLAN ID from the list (1–4094)."
+            )
+            dv.errorTitle = "Invalid entry"
+            ws.add_data_validation(dv)
+            dv.add(f"{svid_letter}{row}")
+
+    # VLAN Tagging Value: VLAN Tagging = No → N/A only; = Yes → same 1–4094 list as Shadow VLAN (B-End tag)
+    vt_idx = col_map.get("VLAN Tagging")
+    vtv_idx = col_map.get("VLAN Tagging Value")
+    if vt_idx and vtv_idx and "ShadowVlanId_WhenRequired" in wb.defined_names:
+        if ref_na_shared is None:
+            opts_col += 1
+            c_na_vtv = get_column_letter(opts_col)
+            opts_ws.cell(row=1, column=opts_col, value="N/A")
+            ref_na_shared = f"'{opts_sheet_name}'!${c_na_vtv}$1:${c_na_vtv}$1"
+        wb.defined_names["VlanTaggingValue_NA_Only"] = DefinedName(
+            "VlanTaggingValue_NA_Only", attr_text=ref_na_shared
+        )
+        vt_letter = get_column_letter(vt_idx)
+        vtv_letter = get_column_letter(vtv_idx)
+        for row in range(2, 201):
+            formula = f'=INDIRECT(IF({vt_letter}{row}="No","VlanTaggingValue_NA_Only","ShadowVlanId_WhenRequired"))'
+            dv = DataValidation(type="list", formula1=formula, allow_blank=True, showDropDown=False)
+            dv.error = (
+                'When "VLAN Tagging" is No, VLAN Tagging Value must be N/A. '
+                "When Yes, pick a VLAN ID from the list (1–4094)."
+            )
+            dv.errorTitle = "Invalid entry"
+            ws.add_data_validation(dv)
+            dv.add(f"{vtv_letter}{row}")
 
     # Add paste tip to Constraints sheet
     try:

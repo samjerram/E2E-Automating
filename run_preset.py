@@ -1365,6 +1365,122 @@ def _scroll_fttp_section_into_view(page) -> None:
         pass
 
 
+def _fttp_click_via_data_testid_stack(page, suffix: str, label_text: str, input_css: str) -> bool:
+    """
+    Portal markup: <div data-testid="fttp-aggregation-yes" id="wrapper-..."><label><input id="fttp-aggregation-yes" class="radioButton__input">...
+    The label does NOT use for=; nested label + wrapper click is what React expects.
+    """
+    testid = f'[data-testid="fttp-aggregation-{suffix}"]'
+    inp = page.locator(input_css)
+
+    def _is_target_checked() -> bool:
+        try:
+            return inp.count() > 0 and inp.first.is_checked()
+        except Exception:
+            return False
+
+    # Playwright test id + synthetic click first (matches portal e2e hooks)
+    try:
+        tid = page.get_by_test_id(f"fttp-aggregation-{suffix}")
+        if tid.count() > 0:
+            t0 = tid.first
+            t0.scroll_into_view_if_needed(timeout=5000)
+            page.wait_for_timeout(80)
+            try:
+                t0.dispatch_event("click")
+            except Exception:
+                pass
+            page.wait_for_timeout(120)
+            if _is_target_checked():
+                return True
+            try:
+                t0.dispatch_event("pointerdown")
+                t0.dispatch_event("pointerup")
+            except Exception:
+                pass
+            try:
+                t0.click(timeout=6000, force=True)
+            except Exception:
+                pass
+            page.wait_for_timeout(180)
+            if _is_target_checked():
+                return True
+    except Exception:
+        pass
+
+    candidates = [
+        lambda: page.locator(testid).first,
+        lambda: page.locator(f"{testid} label").first,
+        lambda: page.locator(f"{testid} p.radioButton__description").filter(
+            has_text=re.compile(rf"^{re.escape(label_text)}$", re.IGNORECASE)
+        ).first,
+        lambda: page.locator(f"{testid} input.radioButton__input").first,
+        lambda: page.locator(f"{testid} input[type='radio']").first,
+    ]
+    for get_loc in candidates:
+        try:
+            loc = get_loc()
+            if loc.count() == 0:
+                continue
+            loc.scroll_into_view_if_needed(timeout=5000)
+            page.wait_for_timeout(70)
+            loc.click(timeout=6000, force=True)
+            page.wait_for_timeout(200)
+            if _is_target_checked():
+                return True
+        except Exception:
+            continue
+
+    # Dispatch click on wrapper from browser (bubbles like a user tap on the card)
+    try:
+        page.evaluate(
+            """(suffix) => {
+                const w = document.querySelector('[data-testid="fttp-aggregation-' + suffix + '"]');
+                if (!w) return false;
+                const inp = w.querySelector('input[type="radio"]');
+                if (inp && (inp.disabled || inp.getAttribute('aria-disabled') === 'true')) return false;
+                w.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                return true;
+            }""",
+            suffix,
+        )
+        page.wait_for_timeout(200)
+        if _is_target_checked():
+            return True
+    except Exception:
+        pass
+
+    # React controlled radios: sync group checked state + input/change (last resort before giving up)
+    try:
+        ok = page.evaluate(
+            """(suffix) => {
+                const el = document.querySelector('#fttp-aggregation-' + suffix);
+                if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                const name = el.name;
+                if (name) {
+                    const nodes = document.getElementsByName(name);
+                    for (let i = 0; i < nodes.length; i++) {
+                        const r = nodes[i];
+                        if (r.type === 'radio') r.checked = r === el;
+                    }
+                } else {
+                    el.checked = true;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                return !!el.checked;
+            }""",
+            suffix,
+        )
+        page.wait_for_timeout(200)
+        if ok and _is_target_checked():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def toggle_fttp_aggregation(page, aggregation_yes: bool) -> bool:
     """Set FTTP Aggregation Yes/No. Staging: wrapper-fttp-aggregation-yes/no, data-testid, input id fttp-aggregation-*.
     Returns True if the requested option appears selected, False if the target control is disabled or could not be set."""
@@ -1377,7 +1493,25 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool) -> bool:
     if avail == "disabled":
         return False
 
-    # 0) Try JavaScript click first (works even if element is off-screen or in collapsed section)
+    _scroll_fttp_section_into_view(page)
+    # Inputs can attach after recalculate / pricing; brief wait then re-check disabled
+    try:
+        page.wait_for_function(
+            "() => document.querySelector('#fttp-aggregation-yes') || document.querySelector('#fttp-aggregation-no')",
+            timeout=10000,
+        )
+    except Exception:
+        pass
+    avail2 = _fttp_target_availability(page, aggregation_yes)
+    if avail2 == "disabled":
+        return False
+
+    # 1) data-testid wrapper + nested label / description / input (portal DOM; label has no for=)
+    if _fttp_click_via_data_testid_stack(page, suffix, label_text, input_id):
+        print(f"✅ FTTP aggregation set: {label_text.upper()} (data-testid stack)")
+        return True
+
+    # 2) Direct input click via JS (off-screen / hidden input)
     try:
         page.evaluate(
             f"""() => {{
@@ -1389,34 +1523,23 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool) -> bool:
         )
         page.wait_for_timeout(150)
         if page.locator(input_id).count() > 0 and page.locator(input_id).first.is_checked():
-            print(f"✅ FTTP aggregation set: {label_text.upper()} (JS click)")
+            print(f"✅ FTTP aggregation set: {label_text.upper()} (JS input click)")
             return True
     except Exception:
         pass
 
-    _scroll_fttp_section_into_view(page)
-    # Inputs can attach after recalculate / pricing; brief wait then re-check disabled
-    try:
-        page.wait_for_function(
-            "() => document.querySelector('#fttp-aggregation-yes') || document.querySelector('#fttp-aggregation-no')",
-            timeout=4000,
-        )
-    except Exception:
-        pass
-    avail2 = _fttp_target_availability(page, aggregation_yes)
-    if avail2 == "disabled":
-        return False
-
     def _try_select() -> bool:
         """Try to select FTTP option. Returns True if input ends up checked."""
         wrapper_id = f"#wrapper-fttp-aggregation-{suffix}"
-        # 1) Click the visible "Yes" or "No" text inside the wrapper (most reliable when radio is styled)
+        # 1) data-testid stack again (retry path)
+        if _fttp_click_via_data_testid_stack(page, suffix, label_text, input_id):
+            return True
+        # 2) Legacy: wrapper id + inner text / label
         try:
             wrapper = page.locator(wrapper_id).first
             wrapper.wait_for(state="attached", timeout=10000)
             wrapper.scroll_into_view_if_needed(timeout=5000)
             page.wait_for_timeout(100)
-            # Click the label or the description text so the radio toggles
             inner = wrapper.get_by_text(label_text, exact=True)
             if inner.count() > 0:
                 inner.first.click(timeout=5000, force=True)
@@ -1427,7 +1550,7 @@ def toggle_fttp_aggregation(page, aggregation_yes: bool) -> bool:
                 return True
         except Exception:
             pass
-        # 2) Click wrapper div (data-testid or id)
+        # 3) Click wrapper div (data-testid or id)
         for sel in [
             f"[data-testid='fttp-aggregation-{suffix}']",
             wrapper_id,
@@ -1535,10 +1658,11 @@ def apply_fttp_aggregation_with_fallback(page, want_yes: bool) -> None:
     try:
         page.wait_for_function(
             "() => document.querySelector('#fttp-aggregation-yes') || document.querySelector('#fttp-aggregation-no')",
-            timeout=4000,
+            timeout=10000,
         )
     except Exception:
         pass
+    page.wait_for_timeout(400)
 
     yes_state = _fttp_target_availability(page, True)
     if yes_state == "disabled":
@@ -1555,6 +1679,11 @@ def apply_fttp_aggregation_with_fallback(page, want_yes: bool) -> None:
 
     if toggle_fttp_aggregation(page, True):
         return
+    for _ in range(4):
+        page.wait_for_timeout(280)
+        _scroll_fttp_section_into_view(page)
+        if toggle_fttp_aggregation(page, True):
+            return
 
     # Yes not disabled but click paths failed — do not silently fall back unless Yes is still not checked
     try:
@@ -1930,7 +2059,7 @@ def publish_and_proceed_to_order(page):
             pub_all.first.scroll_into_view_if_needed(timeout=1000)
             page.wait_for_timeout(50)
             pub_all.first.click()
-        page.wait_for_timeout(150)
+            page.wait_for_timeout(150)
     except Exception as e:
         print(f"ℹ️ No Publish button (customer flow or locator mismatch); going straight to Proceed to order. {e}")
 
@@ -2315,6 +2444,27 @@ def handle_floor_or_room(site_config_section, page, field_name: str, fallback_va
     print(f"⚠️ Could not fill {field_name}; skipping.")
 
 
+def _radio_by_accessible_name(scope, name: str):
+    """
+    Resolve radio by accessible name. Playwright encodes regex names as /pattern/flags; a '/' inside the
+    pattern (e.g. 'N/A') terminates the pattern early and raises InvalidSelectorError — avoid regex for those.
+    """
+    if not str(name).strip():
+        return scope.locator("#__p2nni_empty_radio_name__")
+    if "/" not in name:
+        return scope.get_by_role("radio", name=re.compile(re.escape(name), re.IGNORECASE))
+    for cand in (name, name.upper(), name.lower()):
+        loc = scope.get_by_role("radio", name=cand, exact=True)
+        if loc.count() > 0:
+            return loc
+    if name.replace(" ", "").lower() == "n/a":
+        for spaced in ("N / A", "n / a"):
+            loc = scope.get_by_role("radio", name=spaced, exact=True)
+            if loc.count() > 0:
+                return loc
+    return scope.get_by_role("radio", name=name, exact=True)
+
+
 def _click_radio_by_id(page, base_id: str, value_suffix: str, fallback_role_name: str = None):
     """
     Click a custom-styled radio. Prefer wrapper (#wrapper-{base_id}_{suffix}) as it's the visible element;
@@ -2333,7 +2483,7 @@ def _click_radio_by_id(page, base_id: str, value_suffix: str, fallback_role_name
             except Exception:
                 pass
     if fallback_role_name:
-        el = page.get_by_role("radio", name=re.compile(re.escape(fallback_role_name), re.IGNORECASE))
+        el = _radio_by_accessible_name(page, str(fallback_role_name))
         if el.count() > 0:
             try:
                 el.first.scroll_into_view_if_needed(timeout=3000)
@@ -2343,6 +2493,90 @@ def _click_radio_by_id(page, base_id: str, value_suffix: str, fallback_role_name
             except Exception:
                 pass
     return False
+
+
+def _coerce_b_end_media_to_tx_if_needed(page, preferred_mt: str) -> None:
+    """If Single Mode / multi-mode radios did not stick, select TX when offered (narrow portal journeys)."""
+    if preferred_mt == "TX":
+        return
+    try:
+        ok = page.evaluate(
+            """() => {
+                const ids = ['bEndLocation_mediaType_LR','bEndLocation_mediaType_LX','bEndLocation_mediaType_SR',
+                  'bEndLocation_mediaType_SX','bEndLocation_mediaType_TX','bEndLocation_mediaType_tx'];
+                for (const id of ids) {
+                    const el = document.querySelector('#' + id);
+                    if (el && el.checked) return true;
+                }
+                const any = document.querySelector('[id^="bEndLocation_mediaType_"]:checked');
+                return !!any;
+            }"""
+        )
+        if ok:
+            return
+    except Exception:
+        pass
+    if _click_radio_by_id(page, "bEndLocation_mediaType", "TX", fallback_role_name="TX"):
+        print("ℹ️ Media type: selected TX (portal/journey did not keep Single/Multi Mode).")
+
+
+def _apply_building_prior_and_asbestos(page, site_config: dict) -> None:
+    """Tick building pre-2000 when Yes; always align asbestos (N/A when building is not pre-2000)."""
+    prior = bool(site_config.get("building_built_prior_2000", False))
+    cb_id = "bEndLocation_buildingBuiltPriorTo2000"
+    try:
+        cb = page.locator(f"#{cb_id}")
+        if cb.count() == 0:
+            cb = page.get_by_test_id(cb_id)
+        if cb.count() > 0 and cb.first.is_visible(timeout=1200):
+            try:
+                is_on = cb.first.is_checked()
+            except Exception:
+                is_on = False
+            if prior and not is_on:
+                cb.first.click(timeout=3000)
+                page.wait_for_timeout(280)
+            elif not prior and is_on:
+                cb.first.click(timeout=3000)
+                page.wait_for_timeout(200)
+    except Exception:
+        pass
+
+    if prior:
+        asbestos = bool(site_config.get("asbestos_register", False))
+        ar_suffix = "yes" if asbestos else "no"
+        _click_radio_by_id(
+            page,
+            "bEndLocation_asbestosRegister",
+            ar_suffix,
+            fallback_role_name="Yes" if asbestos else "No",
+        )
+        return
+
+    for suffix in ("na", "n_a", "notApplicable", "not_applicable", "notapplicable"):
+        if _click_radio_by_id(page, "bEndLocation_asbestosRegister", suffix, fallback_role_name="N/A"):
+            print("✅ Asbestos register set to N/A (building not pre-2000).")
+            return
+    try:
+        block = page.locator("div, section").filter(
+            has_text=re.compile(r"asbestos register", re.IGNORECASE)
+        )
+        if block.count() > 0:
+            na = None
+            for label in ("N/A", "n/a", "N / A", "n / a"):
+                cand = block.first.get_by_role("radio", name=label, exact=True)
+                if cand.count() > 0:
+                    na = cand
+                    break
+            if na is not None:
+                na.first.scroll_into_view_if_needed(timeout=3000)
+                na.first.click(timeout=3000)
+                page.wait_for_timeout(180)
+                print("✅ Asbestos register set to N/A (role).")
+                return
+    except Exception:
+        pass
+    print("ℹ️ Could not confirm Asbestos N/A — check portal if the field stays visible.")
 
 
 def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict, bearer: str = "", bandwidth: str = ""):
@@ -2401,17 +2635,26 @@ def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict
             if not _click_radio_by_id(page, "bEndLocation_mediaType", "SX", fallback_role_name="Multi Mode"):
                 _click_radio_by_id(page, "bEndLocation_mediaType", "SR", fallback_role_name="Multi Mode")
 
+    _coerce_b_end_media_to_tx_if_needed(page, str(site_config.get("media_type", "")).upper())
+
     # VLAN tagging
     vlan_tagging = site_config.get("vlan_tagging", False)
     vlan_suffix = "yes" if vlan_tagging else "no"
     if _click_radio_by_id(page, "bEndLocation_vlanTagging", vlan_suffix, fallback_role_name="Yes" if vlan_tagging else "No"):
-        if vlan_tagging:
-            page.wait_for_timeout(400)
-            vlan_tb = page.locator("#bEndLocation_vlanId")
-            if vlan_tb.count() == 0:
-                vlan_tb = page.get_by_label(re.compile(r"VLAN ID", re.IGNORECASE))
-            if vlan_tb.count() > 0 and vlan_tb.first.is_visible(timeout=2000):
-                safe_fill_textbox(vlan_tb.first, str(billing.get("vlan_id", "100")), timeout_ms=5000)
+        page.wait_for_timeout(400)
+        vlan_tb = page.locator("#bEndLocation_vlanId")
+        if vlan_tb.count() == 0:
+            vlan_tb = page.get_by_label(re.compile(r"VLAN ID", re.IGNORECASE))
+        if vlan_tb.count() > 0 and vlan_tb.first.is_visible(timeout=2000):
+            if vlan_tagging:
+                tag_val = str(
+                    billing.get("vlan_tagging_value")
+                    or billing.get("vlan_id")
+                    or "100"
+                ).strip()
+            else:
+                tag_val = "N/A"
+            safe_fill_textbox(vlan_tb.first, tag_val, timeout_ms=5000)
 
     # Auto Negotiation: Yes/No (1 Gbps bearer with 1g/500m/200m/100m bandwidth, or 100 Mbps bearer)
     b_str = (str(bearer or "") or "").lower().replace(" ", "")
@@ -2436,7 +2679,6 @@ def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict
 
     for key, checkbox_id in [
         ("more_than_one_tenant", "bEndLocation_moreThanOneTenant"),
-        ("building_built_prior_2000", "bEndLocation_buildingBuiltPriorTo2000"),
         ("hazards_on_site", "bEndLocation_hazardsOnSite"),
         ("land_owner_permission_required", "bEndLocation_landOwnerPermissionRequired"),
     ]:
@@ -2450,12 +2692,7 @@ def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict
                 if not cb.first.is_checked():
                     cb.first.click(timeout=3000)
                 page.wait_for_timeout(200)
-                if key == "building_built_prior_2000":
-                    page.wait_for_timeout(300)
-                    asbestos = site_config.get("asbestos_register", False)
-                    ar_suffix = "yes" if asbestos else "no"
-                    _click_radio_by_id(page, "bEndLocation_asbestosRegister", ar_suffix, fallback_role_name="Yes" if asbestos else "No")
-                elif key == "hazards_on_site":
+                if key == "hazards_on_site":
                     page.wait_for_timeout(300)
                     hazards_desc = site_config.get("hazards_description") or "Standard building hazards – site survey recommended prior to engineer visit."
                     hazards_tb = page.locator("#bEndLocation_hazardsOnSiteDescription")
@@ -2464,6 +2701,8 @@ def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict
                 page.wait_for_timeout(150)
         except Exception:
             pass
+
+    _apply_building_prior_and_asbestos(page, site_config)
     print("✅ Site Config toggles filled.")
 
 
@@ -2694,10 +2933,44 @@ def _fill_secondary_circuit_site_config(page, billing: dict):
                     safe_fill_textbox(rack_in_sec.first, billing["rack_id"], timeout_ms=8000)
                     print("✅ Secondary Circuit Rack ID filled (fallback).")
 
-def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
+def _try_set_shadow_vlan_na(page, a_end_card) -> bool:
+    """Select N/A for Shadow VLAN when the journey does not require a numeric shadow ID."""
+    for root in (a_end_card, page):
+        try:
+            sec = root.locator("xpath=.").filter(has_text=re.compile(r"Shadow VLAN", re.IGNORECASE))
+            if sec.count() == 0:
+                continue
+            na = None
+            for label in ("N/A", "n/a", "N / A", "n / a"):
+                cand = sec.first.get_by_role("radio", name=label, exact=True)
+                if cand.count() > 0:
+                    na = cand
+                    break
+            if na is not None and na.count() > 0 and na.first.is_visible(timeout=1200):
+                na.first.scroll_into_view_if_needed(timeout=3000)
+                na.first.click(timeout=3000)
+                page.wait_for_timeout(150)
+                return True
+        except Exception:
+            continue
+    try:
+        sid = page.locator("#aEndLocation_shadowVLANId")
+        if sid.count() > 0 and sid.first.is_visible(timeout=900):
+            safe_fill_textbox(sid.first, "N/A", timeout_ms=5000)
+            page.wait_for_timeout(120)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False, shadow_vlan_required: bool = True):
     print("🔎 Locating A-End card...")
     a_end_card = find_card_by_marker_text(page, re.compile(r"\(A-End Location\)", re.IGNORECASE))
     print("✅ A-End card found.")
+
+    did_any = False
+    shadow_done = False
 
     edit_btn = a_end_card.get_by_role("button", name=re.compile(r"^Edit", re.IGNORECASE))
     if edit_btn.count() > 0:
@@ -2717,6 +2990,16 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
         page.wait_for_timeout(200)
     except Exception:
         pass
+
+    if not shadow_vlan_required:
+        if _try_set_shadow_vlan_na(page, a_end_card):
+            print("✅ Shadow VLAN set to N/A (shadow not required).")
+            shadow_done = True
+            did_any = True
+        else:
+            print("ℹ️ Shadow VLAN N/A not applied (field may be hidden when shadow not required).")
+            shadow_done = True
+
     # Prefer A-End–scoped "VLAN Reference" first so we don't fill another card's VLAN ID
     vlan_tb = None
     for scope in [a_end_card, page]:
@@ -2753,11 +3036,13 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
     shadow_vlan_tb = page.get_by_role("textbox", name="Shadow VLAN ID *", exact=True)
     if shadow_vlan_tb.count() == 0:
         shadow_vlan_tb = page.get_by_role("textbox", name=re.compile(r"^Shadow VLAN ID\s*\*$", re.IGNORECASE))
-    did_any = False
     shadow_tb_selected = None
 
     vlan_value = str(billing.get("vlan_id") or "100").strip()
-    shadow_value = str(billing.get("shadow_vlan_id") or "100").strip()
+    if shadow_vlan_required:
+        shadow_value = str(billing.get("shadow_vlan_id") or "100").strip()
+    else:
+        shadow_value = "N/A"
 
     # Wait for primary VLAN input to be visible before any fill (avoids filling a stale/hidden node)
     if vlan_tb.count() > 0:
@@ -2793,7 +3078,6 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
     # Fast path: stable portal IDs (avoids ambiguous side-by-side section locators).
     _fast_vlan_settle = dict(settle_after_fill_ms=220, settle_after_js_ms=150)
     primary_done = False
-    shadow_done = False
     vlan_by_id = page.locator("#aEndLocation_vlanId")
     try:
         if vlan_by_id.count() > 0:
@@ -2864,7 +3148,7 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
 
     shadow_by_id = page.locator("#aEndLocation_shadowVLANId")
     try:
-        if not shadow_done and shadow_by_id.count() > 0:
+        if shadow_vlan_required and (not shadow_done) and shadow_by_id.count() > 0:
             stb = shadow_by_id.first
             stb.wait_for(state="visible", timeout=5000)
             stb.scroll_into_view_if_needed(timeout=3000)
@@ -2888,7 +3172,7 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
     except Exception as e:
         print(f"⚠️ Shadow VLAN ID id-field path failed ({e}); using role locators if present.")
 
-    if not shadow_done and shadow_vlan_tb.count() > 0:
+    if shadow_vlan_required and (not shadow_done) and shadow_vlan_tb.count() > 0:
         # Keep this simple/stable: fill ONLY the first visible shadow VLAN input.
         shadow_tb_selected = None
         for i in range(shadow_vlan_tb.count()):
@@ -2918,14 +3202,14 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
                 except Exception:
                     pass
                 page.wait_for_timeout(250)
-            did_any = True
             if ok:
+                did_any = True
                 print("✅ Shadow VLAN ID filled (verified).")
             else:
                 print("⚠️ Shadow VLAN ID filled, but value may not have stuck immediately.")
         except Exception as e:
             print(f"⚠️ Could not fill Shadow VLAN ID: {e}")
-    elif not shadow_done:
+    elif shadow_vlan_required and not shadow_done:
         print("ℹ️ No Shadow VLAN ID field found.")
 
     if not did_any:
@@ -3002,8 +3286,14 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
     needs_retry = False
     if primary_tb_after and primary_after_val != vlan_value:
         needs_retry = True
-    if shadow_tb_after and shadow_after_val != shadow_value:
-        needs_retry = True
+    if shadow_vlan_required:
+        if shadow_tb_after and shadow_after_val != shadow_value:
+            needs_retry = True
+    else:
+        if shadow_tb_after:
+            s_norm = shadow_after_val.strip().upper().replace(" ", "")
+            if s_norm and s_norm not in ("N/A", "NA"):
+                needs_retry = True
     # If VLAN inputs aren't visible after save, skip verification (don't re-open Edit).
     if primary_tb_after is None and shadow_tb_after is None:
         needs_retry = False
@@ -3014,7 +3304,11 @@ def fill_a_end_vlan_section(page, billing: dict, ro2_diversity: bool = False):
         if primary_tb_after:
             _fill_vlan_and_verify(primary_tb_after, vlan_value)
         if shadow_tb_after:
-            _fill_vlan_and_verify(shadow_tb_after, shadow_value)
+            if shadow_vlan_required:
+                _fill_vlan_and_verify(shadow_tb_after, shadow_value)
+            else:
+                _try_set_shadow_vlan_na(page, a_end_card)
+                _fill_vlan_and_verify(shadow_tb_after, "N/A")
 
         # Save again (wait for button)
         save_btn2 = a_end_card.get_by_role("button", name=re.compile(r"^Save details$", re.IGNORECASE)).first
@@ -3134,15 +3428,107 @@ def fill_billing_contact_information_section(page, billing: dict):
     save_btn = billing_section.get_by_role("button", name=re.compile(r"^Save details$", re.IGNORECASE)).first
     save_btn.scroll_into_view_if_needed()
     save_btn.click()
-    page.wait_for_timeout(180)  # Let save complete + propagate to the stored order state
+    page.wait_for_timeout(600)  # Let save complete + propagate before switching user in Demo 4
     print("✅ Saved Billing & contact information details.")
 
-def fill_order_billing_screen(page, billing: dict, ro2_diversity: bool = False, b_end_postcode: str | None = None, sc_toggles: dict | None = None, bearer: str = "", bandwidth: str = "", submit_for_review: bool = True):
+def _order_ready_for_customer_submit(page) -> bool:
+    """
+    Demo 4 guardrail: before switching to customer, verify order page is truly ready for
+    "Submit for review" (i.e. not still showing incomplete billing bullets / locked section).
+    """
+    # If internal user sees the expected handoff message, the order is ready for customer submit.
+    # Use full body text (not visibility-sensitive locators) because this banner can render with
+    # line breaks / different apostrophes and occasionally fails strict get_by_text matching.
+    try:
+        no_perm_ready = bool(
+            page.evaluate(
+                """() => {
+                    const body = (document.body && document.body.innerText) ? document.body.innerText : '';
+                    const t = body.toLowerCase();
+                    return (
+                        /currently,?\\s*you\\s*(don['’]?t|do\\s*not)\\s*have\\s*permission\\s*to\\s*submit\\s*the\\s*order/.test(t) ||
+                        /copy\\s*the\\s*below\\s*link\\s*and\\s*send\\s*it\\s*to\\s*your\\s*approved\\s*purchaser/.test(t) ||
+                        (/submit\\s*order\\s*for\\s*review/.test(t) && /link\\s*to\\s*share/.test(t) && /approved\\s*purchaser/.test(t))
+                    );
+                }"""
+            )
+        )
+        if no_perm_ready:
+            return True
+    except Exception:
+        pass
+
+    try:
+        # If the review section still shows a lock icon, required sections are not complete yet.
+        review = page.locator("section, div").filter(
+            has_text=re.compile(r"Submit order for review", re.IGNORECASE)
+        ).first
+        if review.count() > 0:
+            try:
+                lock_in_review = review.locator("[class*='lock'], i.fa-lock, svg[data-icon='lock'], svg[class*='lock']")
+                if lock_in_review.count() > 0 and lock_in_review.first.is_visible(timeout=300):
+                    return False
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Billing card incomplete copy seen in failures.
+    for pat in [
+        r"Add contact details for operations and order management",
+        r"Confirm billing reference",
+    ]:
+        try:
+            t = page.get_by_text(re.compile(pat, re.IGNORECASE))
+            if t.count() > 0 and t.first.is_visible(timeout=400):
+                return False
+        except Exception:
+            continue
+
+    return True
+
+
+def _ensure_internal_order_ready_before_customer_submit(
+    page,
+    billing: dict,
+    b_end_postcode: str | None,
+    sc_toggles: dict | None,
+    bearer: str,
+    bandwidth: str,
+) -> bool:
+    """
+    Demo 4 only: run a quick readiness check before logging out internal user.
+    If not ready, re-open/fill Billing & contact once and re-check.
+    """
+    if _order_ready_for_customer_submit(page):
+        return True
+
+    print("⚠️ Order not ready for customer submit (review section still locked/incomplete). Retrying Billing & contact once…")
+    try:
+        fill_billing_contact_information_section(page, billing)
+    except Exception as e:
+        print(f"ℹ️ Billing retry step could not re-open/refill ({e}); re-checking readiness anyway.")
+
+    page.wait_for_timeout(500)
+    return _order_ready_for_customer_submit(page)
+
+
+def fill_order_billing_screen(
+    page,
+    billing: dict,
+    ro2_diversity: bool = False,
+    b_end_postcode: str | None = None,
+    sc_toggles: dict | None = None,
+    bearer: str = "",
+    bandwidth: str = "",
+    submit_for_review: bool = True,
+    shadow_vlan_required: bool = True,
+):
     print("🧾 On order page. Filling billing blocks...")
     page.wait_for_timeout(90)  # Let order page settle
     # RO2 diversity disabled: always pass False to downstream sections
     fill_b_end_section(page, billing, ro2_diversity=False, b_end_postcode=b_end_postcode, sc_toggles=sc_toggles, bearer=bearer, bandwidth=bandwidth)
-    fill_a_end_vlan_section(page, billing, ro2_diversity=False)
+    fill_a_end_vlan_section(page, billing, ro2_diversity=False, shadow_vlan_required=shadow_vlan_required)
     fill_billing_contact_information_section(page, billing)
     if submit_for_review:
         submitted = submit_order_for_review(page)
@@ -3334,10 +3720,10 @@ def _submit_for_review_button_locators(page):
     return [
         page.locator("button.submitOrder--btn"),
         page.get_by_role("button", name=re.compile(r"^Submit for review$", re.IGNORECASE)),
-        page.get_by_role("button", name=re.compile(r"Submit for review", re.IGNORECASE)),
-        page.get_by_role("button", name=re.compile(r"Submit order for review", re.IGNORECASE)),
-        page.get_by_role("link", name=re.compile(r"Submit for review", re.IGNORECASE)),
-        page.get_by_role("link", name=re.compile(r"Submit order for review", re.IGNORECASE)),
+            page.get_by_role("button", name=re.compile(r"Submit for review", re.IGNORECASE)),
+            page.get_by_role("button", name=re.compile(r"Submit order for review", re.IGNORECASE)),
+            page.get_by_role("link", name=re.compile(r"Submit for review", re.IGNORECASE)),
+            page.get_by_role("link", name=re.compile(r"Submit order for review", re.IGNORECASE)),
         page.locator("button, a, [role='button']").filter(has_text=re.compile(r"^Submit for review$", re.IGNORECASE)),
     ]
 
@@ -3511,20 +3897,77 @@ def _extract_basket_id_from_page(page) -> str:
     return ""
 
 
+def _scrape_demo34_order_surface(page, order_id: str) -> tuple[str, str, str, str, str, str, str, str, str, str]:
+    """Best-effort scrape of order page fields for summary CSV (internal or customer view)."""
+    order_number = ""
+    quote_number = ""
+    quote_url_out = ""
+    quotation_num = ""
+    line_id = ""
+    tcv_total = ""
+    install_price = ""
+    annual_rental = ""
+    ftpp_aggregation = ""
+    add_on = ""
+    try:
+        body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
+        body = str(body)
+        om = re.search(r"Order\s+(O-[a-f0-9]+)", body, re.IGNORECASE)
+        if om:
+            order_number = om.group(1).strip()
+        elif order_id:
+            order_number = "O-" + order_id[:8] if len(order_id) >= 8 else "O-" + order_id
+        install_m = re.search(r"Install\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
+        if install_m:
+            install_price = install_m.group(1).replace(",", "")
+        annual_m = re.search(r"Annual\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
+        if annual_m:
+            annual_rental = annual_m.group(1).replace(",", "")
+        fttp_m = re.search(r"FTTP\s+Aggregation\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
+        if fttp_m:
+            ftpp_aggregation = fttp_m.group(1).replace(",", "")
+        quote_links = page.locator("a[href*='/quotes/']").filter(has_text=re.compile(r"Q-|From quote", re.IGNORECASE))
+        if quote_links.count() > 0:
+            try:
+                link_text = quote_links.first.inner_text(timeout=2000) or ""
+                qm = re.search(r"(Q-[a-f0-9]+)", link_text, re.IGNORECASE)
+                if qm:
+                    quote_number = qm.group(1).strip()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return (
+        order_number,
+        quote_number,
+        quote_url_out,
+        quotation_num,
+        line_id,
+        tcv_total,
+        install_price,
+        annual_rental,
+        ftpp_aggregation,
+        add_on,
+    )
+
+
 # ============================
-# Demo 3 / Demo 4 runner (internal creates quote → adjust → customer submits → internal places; Demo 4 captures Basket ID)
+# Demo 3 / 4 / 5 runner (internal quote+adjust; customer submit; optional internal place order + Basket ID poll)
 # ============================
 def run_preset_demo3_demo4(
     preset_path: Path,
     postcode_override: str | None,
+    *,
+    internal_place_order_after_customer: bool = True,
     capture_basket_id: bool,
     headless: bool = False,
-) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
     """
     Returns (order_id, quotation_num, line_id, tcv_total, start_supplier, install_price, annual_rental,
              ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url, basket_id).
-    Uses internal NEOS user to create quote, adjust discounts, then customer (auth.json) to submit for review,
-    then internal again to place order. Demo 4 also polls for Basket ID.
+    Uses internal NEOS user to create quote, adjust discounts, then customer to submit for review.
+    Demo 4/5: internal logs back in and places order. Demo 5 also polls for Basket ID.
+    Demo 3 (short): stops after customer submit (no internal place order / Basket polling).
     """
     preset = json.loads(preset_path.read_text(encoding="utf-8"))
     base_url = preset["base_url"].rstrip("/")
@@ -3534,7 +3977,7 @@ def run_preset_demo3_demo4(
         q["b_end_postcode"] = postcode_override.strip()
     creds = get_neos_internal_creds() if get_neos_internal_creds else None
     if not creds:
-        raise RuntimeError("Demo 3/4 require neos_internal credentials in config.json.")
+        raise RuntimeError("Demo 3/4/5 require neos_internal credentials in config.json.")
 
     with sync_playwright() as p:
         _sm_d = os.environ.get("P2NNI_PLAYWRIGHT_SLOW_MO", "").strip()
@@ -3810,83 +4253,120 @@ def run_preset_demo3_demo4(
             order_id = match.group(1).strip()
         order_url_out = (base_url.rstrip("/") + "/orders/" + order_id) if order_id else (url or "")
 
-        if capture_basket_id:
-            # ---------- Demo 4: internal fills billing only → customer submits for review → internal places order → poll Basket ID ----------
-            fill_order_billing_screen(
-                page,
-                billing,
-                ro2_diversity=q.get("ro2_diversity", False),
-                b_end_postcode=q.get("b_end_postcode"),
-                sc_toggles=preset.get("site_config"),
-                bearer=q.get("bearer", ""),
-                bandwidth=q.get("bandwidth", ""),
-                submit_for_review=False,
+        # ---------- Demo 3/4/5: internal fills billing → customer submits → (optional) internal places order + Basket poll ----------
+        basket_id = ""
+        order_number = ""
+        quote_number = ""
+        quote_url_out = ""
+        quotation_num = ""
+        line_id = ""
+        tcv_total = ""
+        install_price = ""
+        annual_rental = ""
+        ftpp_aggregation = ""
+        add_on = ""
+
+        fill_order_billing_screen(
+            page,
+            billing,
+            ro2_diversity=q.get("ro2_diversity", False),
+            b_end_postcode=q.get("b_end_postcode"),
+            sc_toggles=preset.get("site_config"),
+            bearer=q.get("bearer", ""),
+            bandwidth=q.get("bandwidth", ""),
+            submit_for_review=False,
+            shadow_vlan_required=q.get("shadow_vlan_required", True),
+        )
+        if not _ensure_internal_order_ready_before_customer_submit(
+            page,
+            billing,
+            q.get("b_end_postcode"),
+            preset.get("site_config"),
+            q.get("bearer", ""),
+            q.get("bandwidth", ""),
+        ):
+            print(
+                "⚠️ Internal readiness check did not confirm submit state; "
+                "continuing to customer switch anyway."
             )
 
-            # 4. Change to Customer: do a true session switch like Demo 2.
-            # This avoids "customer step is still internal" when `auth.json` is stale/wrong.
-            print("🔄 Switching to Customer (fresh session) to submit order for review…")
-            try:
-                context.close()
-            except Exception:
-                pass
+        # Change to Customer: true session switch (avoids stale auth.json acting as wrong role).
+        print("🔄 Switching to Customer (fresh session) to submit order for review…")
+        try:
+            context.close()
+        except Exception:
+            pass
 
-            cust_context = browser.new_context()
-            cust_page = cust_context.new_page()
-            cust_page.set_default_timeout(10000)
-            customer_submitted_ok = False
-            try:
-                cust_creds = get_customer_creds() if get_customer_creds else None
-                # Always start at /login to ensure we have the correct identity for submitting for review.
-                cust_page.goto(base_url.rstrip("/") + "/login", wait_until="domcontentloaded", timeout=60000)
-                if cust_creds:
-                    login_ok = _login_customer_page(cust_page, base_url, cust_creds)
-                    if login_ok:
-                        try:
-                            cust_context.storage_state(path=str(AUTH_STATE_PATH))
-                        except Exception:
-                            pass
-                    else:
-                        print("⚠️ Customer auto-login failed; waiting for manual login...")
-
-                if "/login" in (cust_page.url or ""):
-                    print("⏳ Waiting for manual customer login (leave /login to continue)…")
-                    for _ in range(150):  # ~5 minutes
-                        cust_page.wait_for_timeout(2000)
-                        if "/login" not in (cust_page.url or ""):
-                            break
-                    else:
-                        print("⚠️ Customer login timed out — cannot submit for review.")
-
-                    # Save session for next run (auth.json) if user logged in successfully.
-                    if "/login" not in (cust_page.url or ""):
-                        try:
-                            cust_context.storage_state(path=str(AUTH_STATE_PATH))
-                        except Exception:
-                            pass
-
-                # Now that we are logged in as customer, go to the order URL.
-                cust_page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
-
-                # 5. Submitted order for review (with customer permissions)
-                if "/login" not in (cust_page.url or ""):
-                    ok = submit_order_for_review(cust_page)
-                    if ok:
-                        customer_submitted_ok = True
-                        print("✅ Customer submitted order for review.")
-                    else:
-                        print("⚠️ Customer submission for review did not complete (Submit not clicked / success not detected).")
+        cust_context = browser.new_context()
+        cust_page = cust_context.new_page()
+        cust_page.set_default_timeout(10000)
+        customer_submitted_ok = False
+        try:
+            cust_creds = get_customer_creds() if get_customer_creds else None
+            cust_page.goto(base_url.rstrip("/") + "/login", wait_until="domcontentloaded", timeout=60000)
+            if cust_creds:
+                login_ok = _login_customer_page(cust_page, base_url, cust_creds)
+                if login_ok:
+                    try:
+                        cust_context.storage_state(path=str(AUTH_STATE_PATH))
+                    except Exception:
+                        pass
                 else:
-                    print("⚠️ Still on /login; skipping customer submit.")
-            except Exception as e:
-                print(f"⚠️ Customer submit step failed: {e}")
-            finally:
-                cust_context.close()
+                    print("⚠️ Customer auto-login failed; waiting for manual login...")
 
-            if not customer_submitted_ok:
-                raise RuntimeError("Demo 4: customer submission for review did not complete; refusing to place order as internal user.")
+            if "/login" in (cust_page.url or ""):
+                print("⏳ Waiting for manual customer login (leave /login to continue)…")
+                for _ in range(150):  # ~5 minutes
+                    cust_page.wait_for_timeout(2000)
+                    if "/login" not in (cust_page.url or ""):
+                        break
+                else:
+                    print("⚠️ Customer login timed out — cannot submit for review.")
 
-            # 6. Change back to Neos internal user: re-login internal to place order.
+                if "/login" not in (cust_page.url or ""):
+                    try:
+                        cust_context.storage_state(path=str(AUTH_STATE_PATH))
+                    except Exception:
+                        pass
+
+            cust_page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+
+            if "/login" not in (cust_page.url or ""):
+                ok = submit_order_for_review(cust_page)
+                if ok:
+                    customer_submitted_ok = True
+                    print("✅ Customer submitted order for review.")
+                else:
+                    print("⚠️ Customer submission for review did not complete (Submit not clicked / success not detected).")
+            else:
+                print("⚠️ Still on /login; skipping customer submit.")
+
+            if customer_submitted_ok and not internal_place_order_after_customer:
+                print("✅ Short demo: stopping after customer submit (no internal place order / Basket ID poll).")
+                (
+                    order_number,
+                    quote_number,
+                    quote_url_out,
+                    quotation_num,
+                    line_id,
+                    tcv_total,
+                    install_price,
+                    annual_rental,
+                    ftpp_aggregation,
+                    add_on,
+                ) = _scrape_demo34_order_surface(cust_page, order_id)
+        except Exception as e:
+            print(f"⚠️ Customer submit step failed: {e}")
+        finally:
+            cust_context.close()
+
+        if not customer_submitted_ok:
+            msg = "Demo 3/4/5: customer submission for review did not complete."
+            if internal_place_order_after_customer:
+                msg += " Refusing to place order as internal user."
+            raise RuntimeError(msg)
+
+        if internal_place_order_after_customer:
             print("🔄 Switching back to internal user to place order…")
             context = browser.new_context()
             page = context.new_page()
@@ -3894,11 +4374,10 @@ def run_preset_demo3_demo4(
             if not _login_internal_neos(page, base_url, creds):
                 context.close()
                 browser.close()
-                raise RuntimeError("Internal login failed after customer submit (Demo 4).")
+                raise RuntimeError("Internal login failed after customer submit (Demo 4/5).")
 
             page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(1500)
-            # 7. Place order and press OK
             try:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
                 page.wait_for_timeout(800)
@@ -3930,80 +4409,41 @@ def run_preset_demo3_demo4(
                 page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 print(f"⚠️ Place order / OK failed: {e}")
-            # 8. Reload order url and wait, scrape every 5s for Basket ID (~90s total)
-            basket_id = ""
-            refresh_interval_ms = 5000
-            max_attempts = 18
-            print("⏳ Waiting for Basket Id (refreshing every 5s, up to ~90s)…")
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    if attempt == 1 or attempt % 3 == 0:
-                        print(f"  ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
-                    page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(refresh_interval_ms)
-                    basket_id = _extract_basket_id_from_page(page)
-                    if basket_id:
-                        print(f"✅ BasketId captured: {basket_id}")
-                        break
-                except Exception as e:
-                    print(f"  ℹ️ Poll attempt {attempt}: {e}")
-                    continue
-            if not basket_id:
-                print("⚠️ Basket Id not found within timeout.")
-        else:
-            # ---------- Demo 3: internal fills billing and submits for review (no customer switch, no Place order) ----------
-            fill_order_billing_screen(
-                page,
-                billing,
-                ro2_diversity=q.get("ro2_diversity", False),
-                b_end_postcode=q.get("b_end_postcode"),
-                sc_toggles=preset.get("site_config"),
-                bearer=q.get("bearer", ""),
-                bandwidth=q.get("bandwidth", ""),
-                submit_for_review=True,
-            )
-            basket_id = ""
-            page.wait_for_timeout(1200)
 
-        # Capture order/quote refs and scrape pricing + B-End provider from order page
-        order_number = ""
-        quote_number = ""
-        quote_url_out = ""
-        quotation_num = ""
-        line_id = ""
-        tcv_total = ""
-        install_price = ""
-        annual_rental = ""
-        ftpp_aggregation = ""
-        add_on = ""
-        try:
-            body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
-            body = str(body)
-            om = re.search(r"Order\s+(O-[a-f0-9]+)", body, re.IGNORECASE)
-            if om:
-                order_number = om.group(1).strip()
-            elif order_id:
-                order_number = "O-" + order_id[:8] if len(order_id) >= 8 else "O-" + order_id
-            install_m = re.search(r"Install\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-            if install_m:
-                install_price = install_m.group(1).replace(",", "")
-            annual_m = re.search(r"Annual\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-            if annual_m:
-                annual_rental = annual_m.group(1).replace(",", "")
-            fttp_m = re.search(r"FTTP\s+Aggregation\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-            if fttp_m:
-                ftpp_aggregation = fttp_m.group(1).replace(",", "")
-            quote_links = page.locator("a[href*='/quotes/']").filter(has_text=re.compile(r"Q-|From quote", re.IGNORECASE))
-            if quote_links.count() > 0:
-                try:
-                    link_text = quote_links.first.inner_text(timeout=2000) or ""
-                    qm = re.search(r"(Q-[a-f0-9]+)", link_text, re.IGNORECASE)
-                    if qm:
-                        quote_number = qm.group(1).strip()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            if capture_basket_id:
+                refresh_interval_ms = 5000
+                max_attempts = 18
+                print("⏳ Waiting for Basket Id (refreshing every 5s, up to ~90s)…")
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        if attempt == 1 or attempt % 3 == 0:
+                            print(f"  ⏳ BasketId not ready yet (attempt {attempt}/{max_attempts})…")
+                        page.goto(order_url_out, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(refresh_interval_ms)
+                        basket_id = _extract_basket_id_from_page(page)
+                        if basket_id:
+                            print(f"✅ BasketId captured: {basket_id}")
+                            break
+                    except Exception as e:
+                        print(f"  ℹ️ Poll attempt {attempt}: {e}")
+                        continue
+                if not basket_id:
+                    print("⚠️ Basket Id not found within timeout.")
+            else:
+                page.wait_for_timeout(600)
+
+            (
+                order_number,
+                quote_number,
+                quote_url_out,
+                quotation_num,
+                line_id,
+                tcv_total,
+                install_price,
+                annual_rental,
+                ftpp_aggregation,
+                add_on,
+            ) = _scrape_demo34_order_surface(page, order_id)
 
         browser.close()
         return (
@@ -4347,7 +4787,9 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
 
         # CSV Yes = pay upfront; portal "Pay up-front circuit charge" = pay. If portal shows opposite, invert.
         toggle_upfront_charge(page, q.get("pay_upfront", True))
-        page.wait_for_timeout(50)  # Minimal pause before FTTP
+        page.wait_for_timeout(150)
+        _wait_for_updating_overlay_gone(page, timeout_ms=5000)
+        page.wait_for_timeout(300)
         apply_fttp_aggregation_with_fallback(page, q.get("fttp_aggregation", False))
         publish_and_proceed_to_order(page)
 
@@ -4361,7 +4803,16 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
             print(f"⚠️ Not confidently detected order page yet. Current URL: {page.url}")
             page.wait_for_timeout(250)
 
-        fill_order_billing_screen(page, billing, ro2_diversity=q.get("ro2_diversity", False), b_end_postcode=q.get("b_end_postcode"), sc_toggles=preset.get("site_config"), bearer=q.get("bearer", ""), bandwidth=q.get("bandwidth", ""))
+        fill_order_billing_screen(
+            page,
+            billing,
+            ro2_diversity=q.get("ro2_diversity", False),
+            b_end_postcode=q.get("b_end_postcode"),
+            sc_toggles=preset.get("site_config"),
+            bearer=q.get("bearer", ""),
+            bandwidth=q.get("bandwidth", ""),
+            shadow_vlan_required=q.get("shadow_vlan_required", True),
+        )
 
         # Order ID from URL (e.g. .../orders/abc-123)
         order_id = None

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2NNI CSV Upload</title>
+    <title>CSV Upload</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -89,10 +89,11 @@
         .results-sharepoint { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 0.9rem; background: #e3f2fd; border: 1px solid #90caf9; }
         .results-sharepoint.ok { background: #e8f5e9; border-color: #81c784; }
         .results-sharepoint.warn { background: #fff8e1; border-color: #ffca28; }
+        .run-mode-options label { display: block; margin: 6px 0 0 8px; }
     </style>
 </head>
 <body>
-    <h1>P2NNI CSV Upload</h1>
+    <h1>CSV Upload</h1>
 
     <div class="session-box" id="sessionBox">
         <strong>Step 0:</strong> <span class="session-status" id="sessionStatus">Checking…</span>
@@ -101,15 +102,18 @@
             <button type="button" class="btn btn-outline" id="refreshBtn" style="display: none;">Refresh session</button>
         </div>
         <p class="session-msg" id="sessionMsg"></p>
+        <p class="session-msg" id="authModeHint" style="margin-top: 6px;">
+            Auth hint: Demo 1/2 use a customer portal session; Demo 3/4/5 use an internal session for Step 0.
+        </p>
     </div>
 
     <div class="template-download">
         <strong>Step 1:</strong>
         <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
             <a href="/download/template?mode=demo12" class="btn btn-outline" download>Download formatting guide (Demo 1/2)</a>
-            <a href="/download/template?mode=demo34" class="btn btn-outline" download>Download formatting guide (Demo 3/4)</a>
+            <a href="/download/template?mode=demo34" class="btn btn-outline" download>Download formatting guide (Demo 3–5)</a>
         </div>
-        <span class="hint">Open in Excel. When pasting from another file, use Paste Special → Values to keep dropdowns. Then Save As → CSV. Demo 1/2 excludes negotiated/list annual/install price columns; Demo 3/4 includes them.</span>
+        <span class="hint">Open in Excel. When pasting from another file, use Paste Special → Values to keep dropdowns. Then Save As → CSV. Demo 1/2 excludes negotiated/list annual/install price columns; Demo 3–5 includes them.</span>
     </div>
 
     <div class="upload-section">
@@ -122,23 +126,27 @@
     </div>
 
     <p><strong>Step 3:</strong> Click Run. Results and summary download appear below.</p>
-    <div style="margin-bottom: 8px;">
+    <div class="run-mode-options" style="margin-bottom: 8px;">
         <strong>Run mode:</strong>
-        <label style="margin-left: 8px;">
+        <label>
             <input type="radio" name="demoMode" value="demo1" checked>
-            Demo 1 – customer only (submit for review)
+            Demo 1 – Order Placed (BasketID created), but no waiting and scraping for BasketID
         </label>
-        <label style="margin-left: 8px;">
+        <label>
             <input type="radio" name="demoMode" value="demo2">
-            Demo 2 – place order &amp; capture Basket Id (slower)
+            Demo 2 – Order Placed (BasketID created), but DOES wait and scrape for BasketID
         </label>
-        <label style="margin-left: 8px;">
+        <label>
             <input type="radio" name="demoMode" value="demo3">
-            Demo 3 – adjust quote (internal first), no Basket Id
+            Demo 3 – Quote adjusted (internal); internal reaches submit-for-review handoff; customer ticks terms, submits for review, OK — then stops (no internal place order, no Basket ID poll)
         </label>
-        <label style="margin-left: 8px;">
+        <label>
             <input type="radio" name="demoMode" value="demo4">
-            Demo 4 – adjust quote (internal first) &amp; capture Basket Id
+            Demo 4 – Same as Demo 3, then internal user places order and OK; no waiting or scraping for Basket ID
+        </label>
+        <label>
+            <input type="radio" name="demoMode" value="demo5">
+            Demo 5 – Same as Demo 4, then reloads order URL and waits to scrape Basket ID
         </label>
     </div>
     <div id="showBrowserRow" style="margin: 8px 0 12px 0; display: block;">
@@ -174,8 +182,26 @@
         const sessionBox = document.getElementById('sessionBox');
         const sessionStatus = document.getElementById('sessionStatus');
         const sessionMsg = document.getElementById('sessionMsg');
+        const authModeHint = document.getElementById('authModeHint');
         const loginBtn = document.getElementById('loginBtn');
         const refreshBtn = document.getElementById('refreshBtn');
+        function getSelectedMode() {
+            const modeEls = document.querySelectorAll('input[name="demoMode"]');
+            let mode = 'demo1';
+            modeEls.forEach(el => { if (el.checked) mode = el.value; });
+            return mode;
+        }
+
+        function updateAuthModeHint() {
+            if (!authModeHint) return;
+            const mode = getSelectedMode();
+            if (mode === 'demo1' || mode === 'demo2') {
+                authModeHint.textContent = 'Auth hint: Demo 1/2 require a customer portal login in Step 0.';
+            } else {
+                authModeHint.textContent = 'Auth hint: Demo 3/4/5 require an internal portal login in Step 0.';
+            }
+        }
+
 
         let selectedFile = null;
         let sessionOk = false;
@@ -293,8 +319,12 @@
 
         document.addEventListener('DOMContentLoaded', () => {
             fetchSessionStatus();
+            updateAuthModeHint();
 
             // Show-browser is available for all demos; no need to hide it based on mode.
+            document.querySelectorAll('input[name="demoMode"]').forEach(el => {
+                el.addEventListener('change', updateAuthModeHint);
+            });
         });
 
         function updateRunButton() {
@@ -403,11 +433,7 @@
 
             const formData = new FormData();
             formData.append('csv', selectedFile);
-            const modeEls = document.querySelectorAll('input[name="demoMode"]');
-            let mode = 'demo1';
-            modeEls.forEach(el => {
-                if (el.checked) mode = el.value;
-            });
+            let mode = getSelectedMode();
             formData.append('mode', mode);
             const showBrowserEl = document.getElementById('showBrowser');
             if (showBrowserEl && showBrowserEl.checked) formData.append('show_browser', '1');

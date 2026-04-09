@@ -10,7 +10,7 @@ Rules (from portal behaviour):
 - 10/1:  Connector LC,SC | Media LR | Power AC,DC | AutoNeg No (fixed) | VLAN Yes,No
 - 1/1:   Connector LC,SC,RJ45 | Media LX,SX,TX | Power AC,DC | AutoNeg Yes,No | VLAN Yes,No
 - 1/500, 1/200, 1/100: Connector LC,SC,RJ45 | Media TX | Power AC,DC | AutoNeg Yes,No | VLAN Yes,No
-- 100/100: Connector RJ45 | Media TX only | Power AC,DC | AutoNeg Yes,No | VLAN Yes,No
+- 100/100: Connector RJ45 | Media TX only (portal hides Single/Multi Mode on many journeys) | Power AC,DC | AutoNeg Yes,No | VLAN Yes,No
 
 CSV/preset values: Connector (LC,SC,RJ45), Media (LR,SR,TX), Power (AC,DC), AutoNeg (Yes,No), VLAN (Yes,No).
 Portal mapping: LR→LX for 1G/100M single mode; SR→SX for multi mode.
@@ -77,7 +77,7 @@ _CONSTRAINTS = {
     # 100 Mbps bearer
     (100, 100): {
         "connector_type": ["RJ45"],
-        "media_type": ["LR", "SR", "TX"],  # Single Mode (LX), Multi Mode (SX), TX
+        "media_type": ["TX"],
         "power_supply": ["AC", "DC"],
         "auto_negotiation": ["Yes", "No"],
         "vlan_tagging": ["Yes", "No"],

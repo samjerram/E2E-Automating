@@ -27,11 +27,12 @@ if not exist venv\Scripts\activate.bat (
     python -m venv venv
     call venv\Scripts\activate.bat
     pip install -r requirements.txt
-    playwright install chromium
+    python -m playwright install chromium
     echo Setup complete. Starting app...
 ) else (
     call venv\Scripts\activate.bat
 )
 
-python app.py
+REM Use venv interpreter explicitly (avoids Windows Store / wrong python on PATH)
+"%~dp0venv\Scripts\python.exe" app.py
 if errorlevel 1 pause

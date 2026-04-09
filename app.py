@@ -262,12 +262,15 @@ def run():
         # Control browser visibility per demo via env vars consumed by run_csv_regression/run_preset.
         if mode == "demo1":
             os.environ["P2NNI_DEMO1_HEADLESS"] = "0" if show_browser else "1"
+            # Demo 1 now includes internal place-order phase (same as Demo 2, minus Basket polling).
+            # If user asked to show browser, keep internal phase visible too.
+            os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
         elif mode == "demo2":
             os.environ["P2NNI_DEMO2_HEADLESS"] = "0" if show_browser else "1"
             # Demo 2 has TWO separate browser phases (customer + internal NEOS).
             # If the user asked to "Show browser", also make the internal phase visible so they can watch it.
             os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
-        elif mode in ("demo3", "demo4"):
+        elif mode in ("demo3", "demo4", "demo5"):
             os.environ["P2NNI_DEMO34_HEADLESS"] = "0" if show_browser else "1"
         exit_code, results, summary_path, summary_path_powerbi = run_csv_regression(
             tmp_path,
@@ -320,7 +323,7 @@ def run():
 
 @app.route("/download/template")
 def download_template():
-    """Serve the Excel formatting guide (with dropdowns) for download. Regenerate so download always has latest columns."""
+    """Serve the Excel formatting guide (with dropdowns) for download. Always regenerate so downloads match current code."""
     mode = (request.args.get("mode") or "").strip().lower()
     if mode not in ("demo12", "demo34"):
         mode = "demo12"
@@ -329,15 +332,15 @@ def download_template():
 
     try:
         from create_csv_template import create_template
-        if not template_path.exists():
-            create_template(mode)
+
+        create_template(mode)
     except Exception as e:
         print(f"  ⚠️ Could not regenerate template: {e}")
     if not template_path.exists():
         ensure_template_exists()
     if not template_path.exists():
         return "Template not available", 404
-    return send_file(
+    resp = send_file(
         template_path,
         as_attachment=True,
         download_name=(
@@ -345,7 +348,11 @@ def download_template():
             if mode == "demo34"
             else "P2NNI_CSV_Formatting_Guide_Demo12.xlsx"
         ),
+        max_age=0,
     )
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/download/<path:filename>")

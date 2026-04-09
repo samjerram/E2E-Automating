@@ -2,7 +2,53 @@
 
 This file records **official, known-good checkpoints** you can roll back to or reference later.
 
-**Latest:** **v6** (2026-03-25) — robustness (VLAN, FTTP, upfront, submit-for-review, pricing wait) + Demo 2 speed.
+**Latest:** **v7** (2026-04-09) — VLAN Tagging Value (N/A when No), FTTP Yes hardening, Playwright **N/A** radio selector fix, Excel template validation, `run_preset` parse repairs.
+
+---
+
+## OFFICIAL CHECKPOINT v7 — VLAN Tagging Value + FTTP + N/A selector + templates (2026-04-09)
+
+**Status:** OFFICIAL CHECKPOINT v7 — stable after CSV → quote → order site-config fixes and selector hardening.
+
+### What this checkpoint adds (on top of v6)
+
+- **VLAN Tagging Value (CSV + Excel + portal)**  
+  - Excel: per-row list on **VLAN Tagging Value** — **No** → **N/A** only; **Yes** → same 1–4094 list as Shadow VLAN ID (`VlanTaggingValue_NA_Only` / `ShadowVlanId_WhenRequired`).  
+  - `run_csv_regression.py`: forces `billing.vlan_tagging_value` to **`N/A`** when VLAN Tagging is not Yes; row‑1 defaults aligned.  
+  - `run_preset.py` **`_fill_site_config_toggles`**: when VLAN Tagging is **No**, fills **`#bEndLocation_vlanId`** with **`N/A`** if visible so stale numeric tags are cleared.
+
+- **FTTP aggregation “Yes”**  
+  - Stronger **`_fttp_click_via_data_testid_stack`**: `get_by_test_id`, synthetic `click` / `pointerdown`+`pointerup`, forced click; then DOM **`getElementsByName`** + `input`/`change`/`click` for React-controlled radios.  
+  - Customer/quote path: **`_wait_for_updating_overlay_gone`** + short settle before **`apply_fttp_aggregation_with_fallback`** (reduces race with pricing overlay).
+
+- **Playwright `N/A` radios (InvalidSelectorError)**  
+  - **`_radio_by_accessible_name`**: labels containing **`/`** (e.g. **N/A**) no longer use `name=re.compile(...)` (Playwright’s `/pattern/flags` breaks on internal `/`).  
+  - Asbestos and Shadow VLAN **N/A** fallbacks use **exact** name variants (`N/A`, `n/a`, `N / A`, …).
+
+- **`run_preset.py` integrity**  
+  - Repaired broken **`try`/`except`/`if` indentation** in bandwidth selection, upfront toggle, publish flow, A-End VLAN fill, order-page scrape, **`fill_order_billing_screen`** — file parses and runs again.
+
+- **Templates / docs**  
+  - `create_csv_template.py`: instructions + example row for VLAN Tagging Value **N/A** when tagging **No**; docstring updated.  
+  - Supporting: `config.example.json`, `make_backup_zip.sh`, `BACKUP_AND_WINDOWS.md`, `SHAREPOINT_SETUP.md`, `.cursorignore` (where added).
+
+### How to lock / revert exactly
+
+Locked as git tag **`checkpoint-v7-2026-04-09`**.
+
+```bash
+git fetch --tags
+git switch -c recover-v7 checkpoint-v7-2026-04-09
+```
+
+### Key files in this checkpoint
+
+- `run_preset.py` — VLAN B-End N/A fill, FTTP stack + native radio sync, overlay wait, `_radio_by_accessible_name`, `_click_radio_by_id`, asbestos/shadow N/A exact-name locators, syntax repairs.  
+- `run_csv_regression.py` — `vlan_tagging_value` coercion when tagging off.  
+- `create_csv_template.py` — VLAN Tagging Value INDIRECT validation, Instructions/example row.  
+- `CHECKPOINT.md` — this entry.
+
+Use **v7** as the primary “known good” reference for current P2NNI automation behaviour. **v6** and earlier remain historical.
 
 ---
 

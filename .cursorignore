@@ -1,0 +1,16 @@
+# Reduce Cursor indexing load - prevents crashes from large folders
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.eggs/
+release/
+node_modules/
+
+p2nni_regression_results/
+*.mp4
+*.numbers
+*.xlsx
+
