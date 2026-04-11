@@ -3897,8 +3897,12 @@ def _extract_basket_id_from_page(page) -> str:
     return ""
 
 
-def _scrape_demo34_order_surface(page, order_id: str) -> tuple[str, str, str, str, str, str, str, str, str, str]:
-    """Best-effort scrape of order page fields for summary CSV (internal or customer view)."""
+def _scrape_demo34_order_surface(page, order_id: str, base_url: str) -> tuple[str, str, str, str, str, str, str, str, str, str, str]:
+    """Best-effort scrape of order page fields for summary CSV (internal or customer view).
+
+    Returns (order_number, quote_number, quote_url_out, quotation_num, line_id, tcv_total,
+             install_price, annual_rental, ftpp_aggregation, add_on, b_end_supplier).
+    """
     order_number = ""
     quote_number = ""
     quote_url_out = ""
@@ -3909,7 +3913,30 @@ def _scrape_demo34_order_surface(page, order_id: str) -> tuple[str, str, str, st
     annual_rental = ""
     ftpp_aggregation = ""
     add_on = ""
+    b_end_supplier = ""
+    base = (base_url or "").rstrip("/")
     try:
+        page.wait_for_timeout(400)
+        quote_link = None
+        for _ in range(6):
+            for loc in [
+                page.locator("#quote-link"),
+                page.get_by_role("link", name=re.compile(r"From quote:", re.IGNORECASE)),
+                page.get_by_role("link", name=re.compile(r"Q-[a-f0-9-]+", re.IGNORECASE)),
+                page.locator("a[href*='/quotes/']").filter(has_text=re.compile(r"Q-|From quote", re.IGNORECASE)),
+            ]:
+                try:
+                    if loc.count() > 0 and loc.first.is_visible(timeout=1500):
+                        quote_link = loc.first
+                        break
+                except Exception:
+                    continue
+            if quote_link is not None:
+                break
+            page.wait_for_timeout(2000)
+        if quote_link is None and page.locator("#quote-link").count() > 0:
+            quote_link = page.locator("#quote-link").first
+
         body = page.evaluate("() => document.body ? (document.body.innerText || '') : ''") or ""
         body = str(body)
         om = re.search(r"Order\s+(O-[a-f0-9]+)", body, re.IGNORECASE)
@@ -3917,22 +3944,55 @@ def _scrape_demo34_order_surface(page, order_id: str) -> tuple[str, str, str, st
             order_number = om.group(1).strip()
         elif order_id:
             order_number = "O-" + order_id[:8] if len(order_id) >= 8 else "O-" + order_id
-        install_m = re.search(r"Install\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-        if install_m:
-            install_price = install_m.group(1).replace(",", "")
-        annual_m = re.search(r"Annual\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-        if annual_m:
-            annual_rental = annual_m.group(1).replace(",", "")
-        fttp_m = re.search(r"FTTP\s+Aggregation\s*£\s*([0-9,]+\.\d{2})", body, re.IGNORECASE)
-        if fttp_m:
-            ftpp_aggregation = fttp_m.group(1).replace(",", "")
-        quote_links = page.locator("a[href*='/quotes/']").filter(has_text=re.compile(r"Q-|From quote", re.IGNORECASE))
-        if quote_links.count() > 0:
+
+        _money = r"([0-9][0-9,]*(?:\.\d{1,2})?)"
+        if not install_price:
+            for pat in (
+                r"Install(?:\s+price)?\s*£\s*" + _money,
+                r"Install[^£]{0,40}£\s*" + _money,
+                r"Up[-\s]?front[^£]{0,60}£\s*" + _money,
+            ):
+                m = re.search(pat, body, re.IGNORECASE)
+                if m:
+                    install_price = m.group(1).replace(",", "")
+                    break
+        if not annual_rental:
+            for pat in (
+                r"Annual(?:\s+(?:Charge|charge|Rental|rental))?\s*£\s*" + _money,
+                r"Annual[^£]{0,40}£\s*" + _money,
+            ):
+                m = re.search(pat, body, re.IGNORECASE)
+                if m:
+                    annual_rental = m.group(1).replace(",", "")
+                    break
+        if not ftpp_aggregation:
+            for pat in (
+                r"FTTP\s*Aggregation\s*£\s*" + _money,
+                r"FTTP[^£]{0,50}£\s*" + _money,
+            ):
+                m = re.search(pat, body, re.IGNORECASE)
+                if m:
+                    ftpp_aggregation = m.group(1).replace(",", "")
+                    break
+
+        b_end_m = re.search(r"B-End\s*\(([^)]+)\)", body, re.IGNORECASE)
+        if b_end_m:
+            b_end_supplier = b_end_m.group(1).strip()
+
+        if quote_link is not None:
             try:
-                link_text = quote_links.first.inner_text(timeout=2000) or ""
-                qm = re.search(r"(Q-[a-f0-9]+)", link_text, re.IGNORECASE)
+                link_text = quote_link.inner_text(timeout=2000) or ""
+                qm = re.search(r"(Q-[a-f0-9-]+)", link_text, re.IGNORECASE)
                 if qm:
                     quote_number = qm.group(1).strip()
+                href = quote_link.get_attribute("href")
+                if href:
+                    quote_url_out = href if href.startswith("http") else (base + href) if href.startswith("/") else ""
+                if not quote_number and quote_url_out:
+                    qum = re.search(r"/quotes/([^/?#]+)", quote_url_out)
+                    if qum:
+                        slug = qum.group(1).strip()
+                        quote_number = "Q-" + slug[:12] if not slug.upper().startswith("Q-") else slug
             except Exception:
                 pass
     except Exception:
@@ -3948,6 +4008,7 @@ def _scrape_demo34_order_surface(page, order_id: str) -> tuple[str, str, str, st
         annual_rental,
         ftpp_aggregation,
         add_on,
+        b_end_supplier,
     )
 
 
@@ -3961,10 +4022,11 @@ def run_preset_demo3_demo4(
     internal_place_order_after_customer: bool = True,
     capture_basket_id: bool,
     headless: bool = False,
-) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
     """
     Returns (order_id, quotation_num, line_id, tcv_total, start_supplier, install_price, annual_rental,
-             ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url, basket_id).
+             ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url,
+             discount_install, discount_annual, basket_id).
     Uses internal NEOS user to create quote, adjust discounts, then customer to submit for review.
     Demo 4/5: internal logs back in and places order. Demo 5 also polls for Basket ID.
     Demo 3 (short): stops after customer submit (no internal place order / Basket polling).
@@ -4095,6 +4157,9 @@ def run_preset_demo3_demo4(
             if not preferred or not tile_provider:
                 return False
             p, t = preferred.strip().lower(), tile_provider.strip().lower()
+            p_compact, t_compact = re.sub(r"\s+", "", p), re.sub(r"\s+", "", t)
+            if p_compact == "btws" and "bt" in t_compact and "wholesale" in t:
+                return True
             if p == t:
                 return True
             if p == "virgin" and t == "virgin media":
@@ -4177,14 +4242,38 @@ def run_preset_demo3_demo4(
                             page.wait_for_timeout(150)
                 except Exception:
                     pass
+            # Selected (green / aria-selected) tile — do not overwrite preferred_supplier with first carousel tile.
             tiles = page.get_by_test_id("price-tile")
-            n = min(tiles.count(), 8)  # speed: limit supplier scan
+            n = min(tiles.count(), 8)
             for i in range(n):
+                t = tiles.nth(i)
                 try:
-                    txt = tiles.nth(i).inner_text(timeout=500) or ""
-                    start_supplier = _extract_provider(txt)
-                    if start_supplier:
-                        break
+                    has_green = t.evaluate("""el => {
+                        const isGreen = (e) => {
+                            const s = getComputedStyle(e);
+                            for (const prop of ['backgroundColor','borderColor','borderTopColor','outlineColor']) {
+                                const v = (s[prop] || '').trim();
+                                const rgb = v.match(/rgb\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)/);
+                                if (rgb) {
+                                    const r=+rgb[1], g=+rgb[2], b=+rgb[3];
+                                    if (g > 70 && g > r && g > b) return true;
+                                }
+                                if (v.includes('green') || /^#[0-9a-fA-F]{3,8}$/.test(v)) return true;
+                            }
+                            return false;
+                        };
+                        if (el.getAttribute('data-selected')==='true' || el.getAttribute('aria-selected')==='true') return true;
+                        const cls = (el.className||'') + ' ' + (el.parentElement?.className||'');
+                        if (/selected|is-selected|active|highlight/.test(cls)) return true;
+                        if (isGreen(el)) return true;
+                        for (const k of el.querySelectorAll('*')) { if (isGreen(k)) return true; }
+                        return false;
+                    }""")
+                    if has_green and not start_supplier:
+                        txt = t.inner_text(timeout=500) or ""
+                        start_supplier = _extract_provider(txt)
+                        if start_supplier:
+                            break
                 except Exception:
                     continue
             if not start_supplier and n >= 1:
@@ -4222,7 +4311,9 @@ def run_preset_demo3_demo4(
         negotiated_annual = _parse_price(q.get("negotiated_annual"))
         install_discount = max(0.0, list_install - negotiated_install)
         annual_discount = max(0.0, list_annual - negotiated_annual)
-        adjust_quote_discounts(page, f"{install_discount:.2f}".rstrip("0").rstrip("."), f"{annual_discount:.2f}".rstrip("0").rstrip("."))
+        discount_install_str = f"{install_discount:.2f}".rstrip("0").rstrip(".")
+        discount_annual_str = f"{annual_discount:.2f}".rstrip("0").rstrip(".")
+        adjust_quote_discounts(page, discount_install_str, discount_annual_str)
         page.wait_for_timeout(50)
 
         # FTTP: use same robust flow as main preset (Demo 1/2) so "Proceed to order" enables reliably
@@ -4354,7 +4445,10 @@ def run_preset_demo3_demo4(
                     annual_rental,
                     ftpp_aggregation,
                     add_on,
-                ) = _scrape_demo34_order_surface(cust_page, order_id)
+                    b_end_supplier,
+                ) = _scrape_demo34_order_surface(cust_page, order_id, base_url)
+                if b_end_supplier:
+                    start_supplier = b_end_supplier
         except Exception as e:
             print(f"⚠️ Customer submit step failed: {e}")
         finally:
@@ -4443,7 +4537,10 @@ def run_preset_demo3_demo4(
                 annual_rental,
                 ftpp_aggregation,
                 add_on,
-            ) = _scrape_demo34_order_surface(page, order_id)
+                b_end_supplier,
+            ) = _scrape_demo34_order_surface(page, order_id, base_url)
+            if b_end_supplier:
+                start_supplier = b_end_supplier
 
         browser.close()
         return (
@@ -4460,6 +4557,8 @@ def run_preset_demo3_demo4(
             quote_number,
             order_url_out,
             quote_url_out,
+            discount_install_str,
+            discount_annual_str,
             basket_id,
         )
 
@@ -4630,6 +4729,9 @@ def run_preset(preset_path: Path, postcode_override: str | None = None, headless
             if not preferred or not tile_provider:
                 return False
             p, t = preferred.strip().lower(), tile_provider.strip().lower()
+            p_compact, t_compact = re.sub(r"\s+", "", p), re.sub(r"\s+", "", t)
+            if p_compact == "btws" and "bt" in t_compact and "wholesale" in t:
+                return True
             if p == t:
                 return True
             if p == "virgin" and t == "virgin media":

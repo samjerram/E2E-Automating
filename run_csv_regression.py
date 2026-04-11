@@ -92,6 +92,9 @@ class RowResult:
     negotiated_install: str = ""
     list_annual: str = ""
     list_install: str = ""
+    # Demo 3/4/5: discount amounts entered in Adjust quote (install + annual)
+    discount_install: str = ""
+    discount_annual: str = ""
 
 
 def find_presets(presets_dir: Path) -> list[Path]:
@@ -567,8 +570,8 @@ def _run_preset_demo34_impl(
     internal_place_order_after_customer: bool,
     capture_basket_id: bool,
     suppress_output: bool,
-) -> tuple[int, float, str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
-    """Runs Demo 3/4/5 flow; returns 17 elements (same 16 as run_preset + basket_id)."""
+) -> tuple:
+    """Runs Demo 3/4/5 flow; returns 19 elements: code, duration, err, then 16 data fields (incl. discounts + basket_id)."""
     import contextlib
     import io
     import os
@@ -593,8 +596,9 @@ def _run_preset_demo34_impl(
                 capture_basket_id=capture_basket_id,
                 headless=headless_flag,
             )
-        # ret: (order_id, quotation_num, line_id, tcv_total, start_supplier, install_price, annual_rental,
-        #       ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url, basket_id)
+        # ret: order_id, quotation_num, line_id, tcv_total, start_supplier, install_price, annual_rental,
+        #      ftpp_aggregation, add_on, order_number, quote_number, order_url, quote_url,
+        #      discount_install, discount_annual, basket_id
         order_id = (ret[0] or "") if ret else ""
         quotation_id = (ret[1] or "") if len(ret) > 1 else ""
         line_id = (ret[2] or "") if len(ret) > 2 else ""
@@ -608,17 +612,20 @@ def _run_preset_demo34_impl(
         quote_number = (ret[10] or "") if len(ret) > 10 else ""
         order_url = (ret[11] or "") if len(ret) > 11 else ""
         quote_url = (ret[12] or "") if len(ret) > 12 else ""
-        basket_id = (ret[13] or "") if len(ret) > 13 else ""
+        discount_install = (ret[13] or "") if len(ret) > 13 else ""
+        discount_annual = (ret[14] or "") if len(ret) > 14 else ""
+        basket_id = (ret[15] or "") if len(ret) > 15 else ""
         return (
             0, time.perf_counter() - start, "",
             order_id, quotation_id, line_id, tcv_total, start_supplier,
             install_price, annual_rental, ftpp_aggregation, add_on,
-            order_number, quote_number, order_url, quote_url, basket_id,
+            order_number, quote_number, order_url, quote_url,
+            discount_install, discount_annual, basket_id,
         )
     except Exception:
         duration = time.perf_counter() - start
         err = traceback.format_exc()[-800:].strip()
-        return (1, duration, err, "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+        return (1, duration, err) + ("",) * 16
 
 
 def run_preset(preset_path: Path, postcode_override: str | None, headless: bool = True, suppress_output: bool = True) -> tuple[int, float, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
@@ -727,6 +734,8 @@ def _summary_headers_for_mode(mode: str) -> list[str]:
             "NegotiatedInstall",
             "ListAnnual",
             "ListInstall",
+            "InstallDiscount",
+            "AnnualDiscount",
         ]
     if m in ("demo2", "demo5"):
         insert_at = headers.index("Result")
@@ -839,7 +848,7 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, h
             "CompanyName": getattr(r, "company_name", "") or "",
             "Usage": "Point-to-Network-to-Network Interface",
             "Start Supplier": "",
-            "End Supplier": getattr(r, "start_supplier", "") or "BT Openreach",
+            "End Supplier": getattr(r, "start_supplier", "") or "",
             "StartPort Speed": getattr(r, "start_port_speed", "") or "",
             "EndPort Speed": getattr(r, "end_port_speed", "") or "",
             "PathSpeed": getattr(r, "path_speed", "") or "",
@@ -852,6 +861,8 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, h
             "NegotiatedInstall": _format_currency(getattr(r, "negotiated_install", "") or ""),
             "ListAnnual": _format_currency(getattr(r, "list_annual", "") or ""),
             "ListInstall": _format_currency(getattr(r, "list_install", "") or ""),
+            "InstallDiscount": _format_currency(getattr(r, "discount_install", "") or ""),
+            "AnnualDiscount": _format_currency(getattr(r, "discount_annual", "") or ""),
             "Order": getattr(r, "order_number", "") or "",
             "Quote": getattr(r, "quote_number", "") or "",
             "Result": r.result,
@@ -956,7 +967,7 @@ def print_summary(
                     "CompanyName": getattr(r, "company_name", "") or "",
                     "Usage": "Point-to-Network-to-Network Interface",
                     "Start Supplier": "",
-                    "End Supplier": getattr(r, "start_supplier", "") or "BT Openreach",
+                    "End Supplier": getattr(r, "start_supplier", "") or "",
                     "StartPort Speed": getattr(r, "start_port_speed", "") or "",
                     "EndPort Speed": getattr(r, "end_port_speed", "") or "",
                     "PathSpeed": getattr(r, "path_speed", "") or "",
@@ -969,6 +980,8 @@ def print_summary(
                     "NegotiatedInstall": _format_currency(getattr(r, "negotiated_install", "") or ""),
                     "ListAnnual": _format_currency(getattr(r, "list_annual", "") or ""),
                     "ListInstall": _format_currency(getattr(r, "list_install", "") or ""),
+                    "InstallDiscount": _format_currency(getattr(r, "discount_install", "") or ""),
+                    "AnnualDiscount": _format_currency(getattr(r, "discount_annual", "") or ""),
                     "Order": order_cell,
                     "Quote": quote_cell,
                     "Result": r.result,
@@ -991,6 +1004,8 @@ def print_summary(
                 base_row_pbi["NegotiatedInstall"] = _currency_numeric(getattr(r, "negotiated_install", "") or "")
                 base_row_pbi["ListAnnual"] = _currency_numeric(getattr(r, "list_annual", "") or "")
                 base_row_pbi["ListInstall"] = _currency_numeric(getattr(r, "list_install", "") or "")
+                base_row_pbi["InstallDiscount"] = _currency_numeric(getattr(r, "discount_install", "") or "")
+                base_row_pbi["AnnualDiscount"] = _currency_numeric(getattr(r, "discount_annual", "") or "")
                 w_pbi.writerow(base_row_pbi)
 
         print(f"\n  Summary saved to: {summary_path}")
@@ -1334,7 +1349,7 @@ def run_csv_regression(
         except Exception as e:
             ret = (1, 0.0, str(e)[:500], "", "", "", "", "", "", "", "", "", "", "", "", "")
             if use_demo345:
-                ret = ret + ("",)  # 17th element basket_id
+                ret = (1, 0.0, str(e)[:500]) + ("",) * 16
         code = ret[0] if ret else 1
         duration = ret[1] if len(ret) > 1 else 0.0
         stderr_snippet = (ret[2] or "") if len(ret) > 2 else ""
@@ -1351,7 +1366,9 @@ def run_csv_regression(
         quote_number = (ret[13] or "") if len(ret) > 13 else ""
         order_url = (ret[14] or "") if len(ret) > 14 else ""
         quote_url = (ret[15] or "") if len(ret) > 15 else ""
-        basket_id_from_run = (ret[16] or "") if len(ret) > 16 else ""
+        discount_install_from_run = (ret[16] or "") if len(ret) > 16 else ""
+        discount_annual_from_run = (ret[17] or "") if len(ret) > 17 else ""
+        basket_id_from_run = (ret[18] or "") if len(ret) > 18 else ""
         # Retry once on bearer selection failure or Publish timeout (10 Gbps first row often fails due to cold-start)
         retry_triggers = ("Could not select bearer", "Publish button did not appear")
         if code != 0 and stderr_snippet and any(t in stderr_snippet for t in retry_triggers) and not use_demo345:
@@ -1461,6 +1478,8 @@ def run_csv_regression(
             negotiated_install=str(q.get("negotiated_install") or "").strip(),
             list_annual=str(q.get("list_annual") or "").strip(),
             list_install=str(q.get("list_install") or "").strip(),
+            discount_install=discount_install_from_run if use_demo345 else "",
+            discount_annual=discount_annual_from_run if use_demo345 else "",
         )
         results.append(result)
         if progress_callback is not None:
