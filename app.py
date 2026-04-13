@@ -103,13 +103,30 @@ def run_login_flow():
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context()
+            # Use headed Chromium and bring it to front so users don't have to manually pick
+            # the "Chrome for Testing" window from taskbar.
+            browser = p.chromium.launch(
+                headless=False,
+                args=["--start-maximized"],
+            )
+            # Use native window sizing (not fixed 1280x720 viewport) so the login page
+            # is not cramped/disjointed on Windows.
+            context = browser.new_context(no_viewport=True)
             page = context.new_page()
             page.goto(f"{get_portal_base_url()}/login", wait_until="domcontentloaded", timeout=20000)
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            # Be a bit aggressive immediately after open so the auth window pops to foreground.
+            for _ in range(4):
+                _focus_login_browser_window_windows()
+                page.wait_for_timeout(250)
             # Poll until user has left login page (max 5 minutes)
             for _ in range(150):
                 page.wait_for_timeout(2000)
+                # Keep trying for the first few cycles in case Windows focus was stolen.
+                _focus_login_browser_window_windows()
                 if "/login" not in (page.url or ""):
                     break
             else:
@@ -168,13 +185,118 @@ def _frontend_port():
     return 5001
 
 
+def _frontend_url():
+    return f"http://127.0.0.1:{_frontend_port()}"
+
+
+def _app_activate_windows(title_fragments: tuple[str, ...]) -> bool:
+    """Try to activate a Windows app window by title fragment."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        # 1) Native Win32 foreground path (more reliable than AppActivate on some desktops)
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            SW_RESTORE = 9
+            SW_SHOW = 5
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_SHOWWINDOW = 0x0040
+
+            EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            matches: list[tuple[int, str]] = []
+
+            def _enum_cb(hwnd, _lparam):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = (buf.value or "").strip()
+                if not title:
+                    return True
+                t_low = title.lower()
+                for frag in title_fragments:
+                    if frag.lower() in t_low:
+                        matches.append((int(hwnd), title))
+                        break
+                return True
+
+            user32.EnumWindows(EnumWindowsProc(_enum_cb), 0)
+            for hwnd_int, _title in matches:
+                hwnd = wintypes.HWND(hwnd_int)
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.ShowWindow(hwnd, SW_SHOW)
+                # Topmost pulse helps some Windows focus-lock scenarios.
+                user32.SetWindowPos(
+                    hwnd, wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+                )
+                user32.SetWindowPos(
+                    hwnd, wintypes.HWND(HWND_NOTOPMOST), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+                )
+                if user32.SetForegroundWindow(hwnd):
+                    return True
+        except Exception:
+            pass
+
+        # 2) PowerShell fallback:
+        #    Try AppActivate, then ShowWindowAsync + SetForegroundWindow by title.
+        for title in title_fragments:
+            ps = (
+                "$ws = New-Object -ComObject WScript.Shell; "
+                f"if ($ws.AppActivate('{title}')) {{ exit 0 }}; "
+                "$sig='[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd); "
+                "[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'; "
+                "Add-Type -MemberDefinition $sig -Name Win32 -Namespace Native -ErrorAction SilentlyContinue | Out-Null; "
+                "$procs = Get-Process | Where-Object { $_.MainWindowTitle -and "
+                f"$_.MainWindowTitle -match [regex]::Escape('{title}') }}; "
+                "foreach ($p in $procs) { "
+                "  [Native.Win32]::ShowWindowAsync($p.MainWindowHandle, 9) | Out-Null; "
+                "  Start-Sleep -Milliseconds 60; "
+                "  if ([Native.Win32]::SetForegroundWindow($p.MainWindowHandle)) { exit 0 } "
+                "}; "
+                "exit 1"
+            )
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                check=False,
+            )
+            if r.returncode == 0:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _focus_login_browser_window_windows():
+    """Best-effort focus for Playwright login browser on Windows."""
+    _app_activate_windows(
+        (
+            "LIVEQUOTE",
+            "Neos Networks",
+            "Sign in",
+            "Chrome for Testing",
+            "Chromium",
+        )
+    )
+
+
 def _bring_frontend_to_front():
     """
     Try to bring the existing browser window (with the frontend tab) to the front
     without opening a new tab.
 
-    On macOS we use AppleScript to activate Google Chrome; on other platforms
-    this is a no-op.
+    On macOS we activate Chrome. On Windows, focus the frontend URL so the user
+    is returned to the app after login.
     """
     try:
         if platform.system() == "Darwin":
@@ -182,6 +304,18 @@ def _bring_frontend_to_front():
             subprocess.run(
                 ["osascript", "-e", 'tell application "Google Chrome" to activate'],
                 check=False,
+            )
+        elif platform.system() == "Windows":
+            # Focus existing frontend/browser windows without opening a new tab.
+            # This avoids duplicate "CSV Upload" tabs after login.
+            _app_activate_windows(
+                (
+                    "CSV Upload",
+                    "P2NNI CSV Upload",
+                    "127.0.0.1:5001",
+                    "Google Chrome",
+                    "Microsoft Edge",
+                )
             )
     except Exception:
         # Best-effort only; failure here should never break the main flow.
@@ -257,20 +391,21 @@ def run():
             })
 
         # Run the automation (verbose so terminal shows where it fails; no browser popup)
-        mode = request.form.get("mode", "demo1")
+        mode = request.form.get("mode", "demo2")
+        # Presentation-safe mode set: expose only demo2/demo3 for now.
+        if mode not in ("demo2", "demo3"):
+            return jsonify({
+                "ok": False,
+                "error": f"Unsupported demo mode '{mode}'. Available modes are demo2 and demo3.",
+            }), 400
         show_browser = request.form.get("show_browser") == "1"
         # Control browser visibility per demo via env vars consumed by run_csv_regression/run_preset.
-        if mode == "demo1":
-            os.environ["P2NNI_DEMO1_HEADLESS"] = "0" if show_browser else "1"
-            # Demo 1 now includes internal place-order phase (same as Demo 2, minus Basket polling).
-            # If user asked to show browser, keep internal phase visible too.
-            os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
-        elif mode == "demo2":
+        if mode == "demo2":
             os.environ["P2NNI_DEMO2_HEADLESS"] = "0" if show_browser else "1"
             # Demo 2 has TWO separate browser phases (customer + internal NEOS).
             # If the user asked to "Show browser", also make the internal phase visible so they can watch it.
             os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
-        elif mode in ("demo3", "demo4", "demo5"):
+        elif mode == "demo3":
             os.environ["P2NNI_DEMO34_HEADLESS"] = "0" if show_browser else "1"
         exit_code, results, summary_path, summary_path_powerbi = run_csv_regression(
             tmp_path,
@@ -371,7 +506,7 @@ def download(filename):
 if __name__ == "__main__":
     ensure_template_exists()
     port = _frontend_port()  # 5000 often used by macOS AirPlay Receiver
-    url = f"http://127.0.0.1:{port}"
+    url = _frontend_url()
 
     def open_browser():
         import time
