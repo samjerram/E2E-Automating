@@ -150,12 +150,12 @@ def _click_nni_and_select_option(page, trigger, timeout_ms: int = 5000, type_to_
         trigger.click(timeout=5000)
         page.wait_for_timeout(700)  # HICCUP: Let NNI options load
         opts = page.get_by_role("option")
-        # For SP2 8NJ: try click-only first to avoid "London" flash
-        is_salisbury = b_end_postcode and "SP2" in str(b_end_postcode).upper().replace(" ", "")
+        # Wait for dropdown options without typing first (avoids "London" flash when the list is already coming up).
+        # Previously only SP2 did this; other postcodes always typed London, then cleared — noisy in demos.
         options_loaded = False
-        if is_salisbury and type_to_search:
+        if type_to_search:
             try:
-                opts.first.wait_for(state="visible", timeout=3500)
+                opts.first.wait_for(state="visible", timeout=4500)
                 options_loaded = True
             except Exception:
                 pass
@@ -2496,28 +2496,71 @@ def _click_radio_by_id(page, base_id: str, value_suffix: str, fallback_role_name
 
 
 def _coerce_b_end_media_to_tx_if_needed(page, preferred_mt: str) -> None:
-    """If Single Mode / multi-mode radios did not stick, select TX when offered (narrow portal journeys)."""
+    """If Single Mode radios did not stick, select TX when offered (1G/500–100 journeys only).
+
+    Never fall back to TX when the CSV/preset asked for **multi mode** (SR/SX): that forces RJ45+TX
+    in the portal and overwrites a correct LC+Multi selection.
+    """
     if preferred_mt == "TX":
         return
+    pref = (preferred_mt or "").strip().upper()
+    if pref in ("SR", "SX") or "MULTI" in pref:
+        return
     try:
-        ok = page.evaluate(
-            """() => {
-                const ids = ['bEndLocation_mediaType_LR','bEndLocation_mediaType_LX','bEndLocation_mediaType_SR',
-                  'bEndLocation_mediaType_SX','bEndLocation_mediaType_TX','bEndLocation_mediaType_tx'];
-                for (const id of ids) {
-                    const el = document.querySelector('#' + id);
-                    if (el && el.checked) return true;
-                }
-                const any = document.querySelector('[id^="bEndLocation_mediaType_"]:checked');
-                return !!any;
-            }"""
-        )
-        if ok:
-            return
+        for _ in range(4):
+            ok = page.evaluate(
+                """() => {
+                    const ids = ['bEndLocation_mediaType_LR','bEndLocation_mediaType_LX','bEndLocation_mediaType_SR',
+                      'bEndLocation_mediaType_SX','bEndLocation_mediaType_TX','bEndLocation_mediaType_tx'];
+                    for (const id of ids) {
+                        const el = document.querySelector('#' + id);
+                        if (el && el.checked) return true;
+                    }
+                    const any = document.querySelector('[id^="bEndLocation_mediaType_"]:checked');
+                    return !!any;
+                }"""
+            )
+            if ok:
+                return
+            page.wait_for_timeout(220)
     except Exception:
         pass
     if _click_radio_by_id(page, "bEndLocation_mediaType", "TX", fallback_role_name="TX"):
         print("ℹ️ Media type: selected TX (portal/journey did not keep Single/Multi Mode).")
+
+
+def _b_end_connector_checked_suffix(page) -> str | None:
+    """Return LC/SC/RJ45 for whichever bEndLocation_connectorType radio is checked, else None."""
+    try:
+        return page.evaluate(
+            """() => {
+                for (const suf of ['LC','SC','RJ45']) {
+                    const el = document.querySelector('#bEndLocation_connectorType_' + suf);
+                    if (el && el.checked) return suf;
+                }
+                return null;
+            }"""
+        )
+    except Exception:
+        return None
+
+
+def _reassert_connector_after_media(page, site_config: dict) -> None:
+    """Portal sometimes flips connector (e.g. LC→RJ45) after media/TX coercion; restore CSV intent."""
+    mt_preset = str(site_config.get("media_type", "LR") or "LR").upper()
+    if mt_preset == "TX":
+        # RJ45+TX can be required (e.g. 1G/500–100, 100M); do not fight the portal.
+        return
+    want = str(site_config.get("connector_type", "LC") or "LC").upper()
+    if want not in ("LC", "SC", "RJ45"):
+        return
+    got = _b_end_connector_checked_suffix(page)
+    if got == want:
+        return
+    if got is not None and got != want:
+        print(f"ℹ️ Connector was {got} after media step; re-applying {want} from preset.")
+        _click_radio_by_id(page, "bEndLocation_connectorType", want, fallback_role_name=want)
+        page.wait_for_timeout(250)
 
 
 def _apply_building_prior_and_asbestos(page, site_config: dict) -> None:
@@ -2635,7 +2678,10 @@ def _fill_site_config_toggles(page, b_end_card, site_config: dict, billing: dict
             if not _click_radio_by_id(page, "bEndLocation_mediaType", "SX", fallback_role_name="Multi Mode"):
                 _click_radio_by_id(page, "bEndLocation_mediaType", "SR", fallback_role_name="Multi Mode")
 
+    page.wait_for_timeout(400)
+
     _coerce_b_end_media_to_tx_if_needed(page, str(site_config.get("media_type", "")).upper())
+    _reassert_connector_after_media(page, site_config)
 
     # VLAN tagging
     vlan_tagging = site_config.get("vlan_tagging", False)

@@ -20,9 +20,6 @@ from flask import Flask, render_template, request, jsonify, send_file
 # Import our existing CSV regression logic
 from run_csv_regression import run_csv_regression, validate_csv, RowResult
 
-# SharePoint: manual upload only (link shown after run); no automatic upload to avoid extra runtime
-SHAREPOINT_FOLDER_URL = "https://kinnersleyanalytics.sharepoint.com/sites/PowerBI/Shared%20Documents/Neos/Regression%20Testing/"
-
 app = Flask(__name__)
 # Allow larger file uploads (CSV is small, but just in case)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB
@@ -407,7 +404,7 @@ def run():
             os.environ["P2NNI_DEMO2_INTERNAL_HEADLESS"] = "0" if show_browser else "1"
         elif mode == "demo3":
             os.environ["P2NNI_DEMO34_HEADLESS"] = "0" if show_browser else "1"
-        exit_code, results, summary_path, summary_path_powerbi = run_csv_regression(
+        exit_code, results, summary_download_path = run_csv_regression(
             tmp_path,
             quiet=False,
             verbose=True,
@@ -415,9 +412,6 @@ def run():
             progress_dict=RUN_PROGRESS,
             mode=mode,
         )
-
-        # Manual SharePoint upload: return folder link only (no automatic upload, no extra runtime)
-        sp_upload = {"folder_url": SHAREPOINT_FOLDER_URL, "manual": True}
 
         # Build response
         passed = sum(1 for r in results if r.exit_code == 0)
@@ -440,9 +434,7 @@ def run():
                 }
                 for r in results
             ],
-            "summary_filename": summary_path.name if summary_path else None,
-            "summary_powerbi_filename": summary_path_powerbi.name if summary_path_powerbi else None,
-            "sharepoint": sp_upload,
+            "summary_filename": summary_download_path.name if summary_download_path else None,
         })
     except Exception as e:
         return jsonify({
@@ -479,9 +471,9 @@ def download_template():
         template_path,
         as_attachment=True,
         download_name=(
-            "P2NNI_CSV_Formatting_Guide_Demo34.xlsx"
+            "P2NNI_CSV_Formatting_Guide_Bulk_Order.xlsx"
             if mode == "demo34"
-            else "P2NNI_CSV_Formatting_Guide_Demo12.xlsx"
+            else "P2NNI_CSV_Formatting_Guide_Regression_Pack.xlsx"
         ),
         max_age=0,
     )
@@ -492,7 +484,7 @@ def download_template():
 
 @app.route("/download/<path:filename>")
 def download(filename):
-    """Serve the summary CSV file for download."""
+    """Serve generated summary files (e.g. Excel or CSV) from the results folder."""
     # Security: only allow files from our results dir
     base = Path(__file__).resolve().parent / "p2nni_regression_results"
     path = (base / filename).resolve()

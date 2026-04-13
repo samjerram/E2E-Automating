@@ -73,9 +73,7 @@
         .sample-row select { padding: 8px 12px; font-size: 1rem; min-width: 220px; border-radius: 6px; }
         .or { text-align: center; color: #888; margin: 12px 0; }
         .template-download { margin: 24px 0 32px; padding: 20px; background: #e3f2fd; border-radius: 8px; }
-        .template-download .btn-outline { background: transparent; color: #1565c0; border: 2px solid #1565c0; display: inline-block; margin-bottom: 8px; }
-        .template-download .btn-outline:hover { background: #1565c0; color: white; }
-        .template-download .hint { display: block; font-size: 0.85rem; color: #555; margin-top: 8px; }
+        .template-download .hint { display: block; font-size: 0.9rem; color: #555; margin-top: 8px; }
         .upload-section { margin: 32px 0 16px; padding-top: 16px; border-top: 1px solid #e0e0e0; color: #555; }
         .session-box { margin-bottom: 24px; padding: 16px 20px; border-radius: 8px; background: #f5f5f5; }
         .session-box.ok { background: #e8f5e9; }
@@ -86,9 +84,6 @@
         .session-actions .btn-outline { background: transparent; color: #1565c0; border: 2px solid #1565c0; }
         .session-actions .btn-outline:hover { background: #1565c0; color: white; }
         .session-msg { font-size: 0.9rem; color: #555; margin-top: 6px; }
-        .results-sharepoint { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 0.9rem; background: #e3f2fd; border: 1px solid #90caf9; }
-        .results-sharepoint.ok { background: #e8f5e9; border-color: #81c784; }
-        .results-sharepoint.warn { background: #fff8e1; border-color: #ffca28; }
         .run-mode-options label { display: block; margin: 6px 0 0 8px; }
     </style>
 </head>
@@ -96,28 +91,24 @@
     <h1>CSV Upload</h1>
 
     <div class="session-box" id="sessionBox">
-        <strong>Step 0:</strong> <span class="session-status" id="sessionStatus">Checking…</span>
+        <strong>Step 1:</strong> <span class="session-status" id="sessionStatus">Checking…</span>
         <div class="session-actions" id="sessionActions">
             <button type="button" class="btn" id="loginBtn">Login to portal</button>
             <button type="button" class="btn btn-outline" id="refreshBtn" style="display: none;">Refresh session</button>
         </div>
         <p class="session-msg" id="sessionMsg"></p>
         <p class="session-msg" id="authModeHint" style="margin-top: 6px;">
-            Auth hint: Demo 2 uses a customer portal session; Demo 3 uses an internal session for Step 0.
+            Auth hint: Regression pack requires Customer login details to auth
         </p>
     </div>
 
     <div class="template-download">
-        <strong>Step 1:</strong>
-        <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:10px;">
-            <a href="/download/template?mode=demo12" class="btn btn-outline" download>Download formatting guide (Regression Pack)</a>
-            <a href="/download/template?mode=demo34" class="btn btn-outline" download>Download formatting guide (Bulk Order)</a>
-        </div>
-        <span class="hint">Open in Excel. When pasting from another file, use Paste Special → Values to keep dropdowns. Then Save As → CSV. Demo 2 excludes negotiated/list annual/install price columns; Demo 3 includes them.</span>
+        <strong>Step 2:</strong>
+        <span class="hint">Open in Excel and save as CSV.</span>
     </div>
 
     <div class="upload-section">
-        <strong>Step 2:</strong> Upload your CSV below.
+        <strong>Step 3:</strong> Upload your CSV below.
     </div>
 
     <div class="upload-area" id="uploadArea">
@@ -125,7 +116,7 @@
         <input type="file" id="fileInput" accept=".csv">
     </div>
 
-    <p><strong>Step 3:</strong> Click Run. Results and summary download appear below.</p>
+    <p><strong>Step 4:</strong> Click Run. Results and an Excel summary download (fitted columns) appear below.</p>
     <div class="run-mode-options" style="margin-bottom: 8px;">
         <strong>Run mode:</strong>
         <label>
@@ -145,7 +136,6 @@
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
         <button class="btn" id="runBtn" disabled>Run</button>
-        <button class="btn" id="runPbiBtn" disabled title="Run, download Power BI CSV, and open SharePoint folder">Run to PBI</button>
     </div>
 
     <div id="status"></div>
@@ -161,7 +151,6 @@
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
         const runBtn = document.getElementById('runBtn');
-        const runPbiBtn = document.getElementById('runPbiBtn');
         const status = document.getElementById('status');
         const results = document.getElementById('results');
         const progressBox = document.getElementById('progress');
@@ -184,9 +173,9 @@
             if (!authModeHint) return;
             const mode = getSelectedMode();
             if (mode === 'demo2') {
-                authModeHint.textContent = 'Auth hint: Demo 2 requires a customer portal login in Step 0.';
+                authModeHint.textContent = 'Auth hint: Regression pack requires Customer login details to auth';
             } else {
-                authModeHint.textContent = 'Auth hint: Demo 3 requires an internal portal login in Step 0.';
+                authModeHint.textContent = 'Auth hint: Bulk Order requires internal portal login details to auth';
             }
         }
 
@@ -259,7 +248,7 @@
                 if (sessionOk) {
                     sessionStatus.textContent = 'Session: OK';
                     sessionBox.classList.add('ok');
-                    sessionMsg.textContent = 'You can run your CSV below.';
+                    sessionMsg.textContent = 'You can continue with Steps 2–4 below.';
                 } else {
                     sessionStatus.textContent = 'Session: not logged in';
                     sessionBox.classList.add('expired');
@@ -317,7 +306,6 @@
 
         function updateRunButton() {
             runBtn.disabled = !sessionOk || !selectedFile;
-            runPbiBtn.disabled = !sessionOk || !selectedFile;
         }
 
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -359,62 +347,23 @@
             return div.innerHTML;
         }
 
-        function renderResults(data) {
-            const cls = data.failed > 0 ? '' : 'success';
-            let html = '<div class="results ' + cls + '">';
-            html += '<div class="results-summary"><strong>Summary:</strong> ' + data.passed + ' passed, ' + data.failed + ' failed (' + (data.passed + data.failed) + ' total)</div>';
-            html += '<div class="results-list"><strong>Results:</strong>';
-            (data.results || []).forEach(r => {
-                const rowClass = r.result === 'Pass' ? 'pass' : 'fail';
-                html += '<div class="result-row ' + rowClass + '">' + (r.result === 'Pass' ? '✓' : '✗') + ' ' + r.preset_id + ' (' + r.duration_sec + 's)';
-                if (r.result === 'Fail' && r.error_detail) {
-                    html += '<pre class="error-detail">' + escapeHtml(r.error_detail) + '</pre>';
-                }
-                html += '</div>';
-            });
-            html += '</div>';
-            if (data.summary_filename) {
-                html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary CSV</a></div>';
-            }
-            if (data.summary_powerbi_filename) {
-                html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_powerbi_filename) + '" class="btn download-btn" download>Download Power BI CSV</a></div>';
-            }
-            if (data.sharepoint && data.sharepoint.folder_url) {
-                html += '<div class="results-sharepoint ok"><strong>Upload summary manually:</strong> <a href="' + escapeHtml(data.sharepoint.folder_url) + '" target="_blank" rel="noopener">Open Power BI folder</a></div>';
-            }
-            html += '</div>';
-            return html;
-        }
-
-        async function runAutomation(pbiAssist = false) {
+        async function runAutomation() {
             if (!selectedFile) return;
 
             runBtn.disabled = true;
-            runPbiBtn.disabled = true;
             runBtn.textContent = 'Running…';
-            runPbiBtn.textContent = pbiAssist ? 'Running to PBI…' : 'Run to PBI';
             status.innerHTML = '<span class="loading">Running automation… Do not close this page.</span>';
             results.innerHTML = '';
             progressBox.style.display = 'block';
             progressText.textContent = 'Preparing run…';
             progressBarInner.style.width = '0%';
             startProgressPolling();
-            let pbiTab = null;
-            if (pbiAssist) {
-                // Open tab early to avoid browser popup blockers after async work.
-                pbiTab = window.open('about:blank', '_blank');
-                if (pbiTab) {
-                    pbiTab.document.write('<p style="font-family:sans-serif;padding:20px;">Preparing Power BI folder…</p>');
-                }
-            }
 
             const ok = await fetchSessionStatus();
             if (!ok) {
-                status.innerHTML = '<span class="error-msg">Please log in first (Step 0). Click "Login to portal", then try again.</span>';
+                status.innerHTML = '<span class="error-msg">Please log in first (Step 1). Click "Login to portal", then try again.</span>';
                 runBtn.disabled = false;
-                runPbiBtn.disabled = false;
                 runBtn.textContent = 'Run';
-                runPbiBtn.textContent = 'Run to PBI';
                 resetProgress();
                 return;
             }
@@ -438,9 +387,7 @@
                 } catch (parseErr) {
                     status.innerHTML = '<span class="error-msg">Server returned an error (invalid response). Try again or check the terminal.</span>';
                     runBtn.disabled = false;
-                    runPbiBtn.disabled = false;
                     runBtn.textContent = 'Run';
-                    runPbiBtn.textContent = 'Run to PBI';
                     resetProgress();
                     return;
                 }
@@ -457,9 +404,7 @@
                         }
                     }
                     runBtn.disabled = false;
-                    runPbiBtn.disabled = false;
                     runBtn.textContent = 'Run';
-                    runPbiBtn.textContent = 'Run to PBI';
                     resetProgress();
                     return;
                 }
@@ -479,54 +424,22 @@
                     });
                     html += '</div>';
                     if (data.summary_filename) {
-                        html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary CSV</a></div>';
-                    }
-                    if (!pbiAssist && data.summary_powerbi_filename) {
-                        html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_powerbi_filename) + '" class="btn download-btn" download>Download Power BI CSV</a></div>';
-                    }
-                    if (data.sharepoint && data.sharepoint.folder_url) {
-                        html += '<div class="results-sharepoint ok"><strong>Upload summary manually:</strong> <a href="' + escapeHtml(data.sharepoint.folder_url) + '" target="_blank" rel="noopener">Open Power BI folder</a></div>';
+                        html += '<div class="results-download"><a href="/download/' + encodeURIComponent(data.summary_filename) + '" class="btn download-btn" download>Download summary</a></div>';
                     }
                     html += '</div>';
                     status.innerHTML = 'Done.';
                     results.innerHTML = html;
-
-                    if (pbiAssist) {
-                        if (data.summary_powerbi_filename) {
-                            const link = document.createElement('a');
-                            link.href = '/download/' + encodeURIComponent(data.summary_powerbi_filename);
-                            link.download = data.summary_powerbi_filename;
-                            document.body.appendChild(link);
-                            link.click();
-                            document.body.removeChild(link);
-                        }
-                        if (data.sharepoint && data.sharepoint.folder_url) {
-                            if (pbiTab && !pbiTab.closed) {
-                                pbiTab.location.href = data.sharepoint.folder_url;
-                            } else {
-                                window.open(data.sharepoint.folder_url, '_blank');
-                            }
-                        } else if (pbiTab && !pbiTab.closed) {
-                            pbiTab.close();
-                        }
-                        status.innerHTML = 'Done. Power BI CSV download started and Power BI folder opened.';
-                    }
                 }
             } catch (err) {
                 status.innerHTML = '<span class="error-msg">Error: ' + escapeHtml(err.message) + '</span>';
             }
             runBtn.disabled = false;
-            runPbiBtn.disabled = false;
             runBtn.textContent = 'Run';
-            runPbiBtn.textContent = 'Run to PBI';
             resetProgress();
         }
 
         runBtn.addEventListener('click', async () => {
-            await runAutomation(false);
-        });
-        runPbiBtn.addEventListener('click', async () => {
-            await runAutomation(true);
+            await runAutomation();
         });
     </script>
 </body>

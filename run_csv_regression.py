@@ -67,7 +67,7 @@ class RowResult:
     duration_sec: float
     result: str  # "Pass" or "Fail"
     error_detail: str = ""  # Stderr snippet when failed
-    # Power BI / SharePoint bridge
+    # Optional portal scrape fields for summary export
     order_id: str = ""
     quotation_id: str = ""  # PE/DP: digits from "PE-28620239" (same value for both columns)
     line_id: str = ""      # Quotation line ID (which broadband tile); empty if not scraped
@@ -699,7 +699,7 @@ def prompt_for_csv() -> Path | None:
     return p if p.exists() else None
 
 
-# Power BI / SharePoint bridge: base headers for live data.
+# Summary CSV / Excel column headers (aligned across outputs).
 SUMMARY_CSV_BASE_HEADERS = [
     "Preset ID",
     "StartPostCode",
@@ -718,7 +718,7 @@ SUMMARY_CSV_BASE_HEADERS = [
     "Quote",
     "Order",
     "Result",
-    "Duration (seconds)",
+    "Duration",
     "Date Completed",
     "Error",
 ]
@@ -755,6 +755,23 @@ def _format_tcv(raw: str) -> str:
         return raw
 
 
+def _format_duration_cell(sec: float) -> str:
+    """Human-readable duration for summary cells (e.g. '67 seconds', '66.6 seconds')."""
+    s = float(sec)
+    if abs(s - round(s)) < 0.05:
+        return f"{int(round(s))} seconds"
+    return f"{s:.1f} seconds"
+
+
+def _date_completed_for_excel_csv(dt_str: str) -> str:
+    """Wrap timestamp as an Excel text formula so narrow columns do not show ####."""
+    s = (dt_str or "").strip()
+    if not s:
+        return ""
+    inner = s.replace('"', '""')
+    return f'="{inner}"'
+
+
 def _format_currency(raw: str) -> str:
     """Format currency for CSV: e.g. '4072.00' -> '£4,072.00'."""
     try:
@@ -767,29 +784,8 @@ def _format_currency(raw: str) -> str:
         return str(raw or "")
 
 
-def _currency_numeric(raw: str) -> str:
-    """Currency as plain number string for Power BI (no £, no commas).
-
-    Examples:
-      - '0.00' -> '0'
-      - '4072.00' -> '4072'
-      - '4054.05' -> '4054.05'
-    """
-    try:
-        s = (raw or "").strip().replace(",", "").lstrip("£")
-        if not s:
-            return ""
-        val = float(s)
-        # Drop .00 for whole numbers, keep 2dp otherwise
-        if val.is_integer():
-            return str(int(val))
-        return f"{val:.2f}"
-    except (ValueError, TypeError):
-        return (raw or "").strip()
-
-
-def _term_length_for_powerbi(raw: str) -> str:
-    """Normalise contract_term to numeric months for Power BI (e.g. '1 year' -> '12', '36 months' -> '36')."""
+def _term_length_cell(raw: str) -> str:
+    """Normalise contract_term to numeric months for summary (e.g. '1 year' -> '12', '36 months' -> '36')."""
     s = (raw or "").strip()
     if not s:
         return ""
@@ -852,7 +848,7 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, h
             "StartPort Speed": getattr(r, "start_port_speed", "") or "",
             "EndPort Speed": getattr(r, "end_port_speed", "") or "",
             "PathSpeed": getattr(r, "path_speed", "") or "",
-            "TermLength": _term_length_for_powerbi(getattr(r, "term_length", "") or ""),
+            "TermLength": _term_length_cell(getattr(r, "term_length", "") or ""),
             "InstallPrice": _format_currency(getattr(r, "install_price", "") or ""),
             "AnnualRental": _format_currency(getattr(r, "annual_rental", "") or ""),
             "FTTP Aggregation": _format_currency(getattr(r, "ftpp_aggregation", "") or ""),
@@ -866,7 +862,7 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, h
             "Order": getattr(r, "order_number", "") or "",
             "Quote": getattr(r, "quote_number", "") or "",
             "Result": r.result,
-            "Duration (seconds)": round(r.duration_sec, 1),
+            "Duration": _format_duration_cell(r.duration_sec),
             "Date Completed": getattr(r, "completed_at", date_str) or date_str,
             "Error": (getattr(r, "error_detail", "") or "")[:2000],
         }
@@ -896,11 +892,42 @@ def _write_summary_xlsx(results: list, summary_path_xlsx: Path, date_str: str, h
                     ws.cell(row=row_idx, column=col_idx, value=val)
             else:
                 ws.cell(row=row_idx, column=col_idx, value=val)
-    # Apply column widths based on max text length (cap to avoid huge "Error" column)
+    # Column widths: at least header length + padding; widen caps so labels like Duration / Negotiated* are not clipped.
     for col_idx, header in enumerate(headers, start=1):
-        from openpyxl.utils import get_column_letter
-        width = min(max_len.get(header, len(header)) + 2, 40)
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
+        letter = get_column_letter(col_idx)
+        content_len = max_len.get(header, 0)
+        raw_len = float(max(content_len, len(header)) + 3)
+        if header == "Date Completed":
+            width = max(22.0, min(raw_len, 28.0))
+        elif header == "Usage":
+            width = max(42.0, min(raw_len, 54.0))
+        elif header == "Error":
+            width = min(max(raw_len, 14.0), 80.0)
+        elif header in (
+            "InstallPrice",
+            "AnnualRental",
+            "FTTP Aggregation",
+            "NegotiatedAnnual",
+            "NegotiatedInstall",
+            "ListAnnual",
+            "ListInstall",
+            "InstallDiscount",
+            "AnnualDiscount",
+        ):
+            width = max(18.0, min(raw_len, 28.0))
+        elif header == "Duration":
+            width = max(22.0, min(raw_len, 36.0))
+        elif header in ("Start Supplier", "End Supplier", "CompanyName"):
+            width = max(20.0, min(raw_len, 48.0))
+        elif header in ("StartPort Speed", "EndPort Speed", "PathSpeed", "TermLength", "BasketId", "Result"):
+            width = max(float(len(header) + 2), min(raw_len, 22.0))
+        elif header in ("StartPostCode", "EndPostCode", "Preset ID"):
+            width = max(14.0, min(raw_len, 26.0))
+        elif header in ("Quote", "Order"):
+            width = max(14.0, min(raw_len, 36.0))
+        else:
+            width = min(max(raw_len, 12.0), 56.0)
+        ws.column_dimensions[letter].width = width
     wb.save(summary_path_xlsx)
 
 
@@ -908,11 +935,13 @@ def print_summary(
     results: list[RowResult],
     total_duration: float,
     summary_path: Path | None,
-    summary_path_powerbi: Path | None = None,
     run_id: str | None = None,
     mode: str = "demo1",
-):
-    """Print and optionally save summary. run_id: same for all rows in this run (for Power BI)."""
+) -> Path | None:
+    """Print and optionally save summary. run_id: same for all rows in this run.
+
+    Returns the path best suited for download: Excel summary when available, otherwise the CSV path.
+    """
     passed = sum(1 for r in results if r.exit_code == 0)
     failed = len(results) - passed
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -935,14 +964,10 @@ def print_summary(
 
     if summary_path:
         RESULTS_DIR.mkdir(exist_ok=True)
-        # Power BI variant: same headers but numeric currency fields
-        summary_powerbi = summary_path_powerbi or summary_path.with_name(summary_path.stem + "_powerbi.csv")
-        with open(summary_path, "w", newline="", encoding="utf-8") as f_pretty, \
-             open(summary_powerbi, "w", newline="", encoding="utf-8") as f_pbi:
+        # utf-8-sig: BOM so Excel on Windows opens as UTF-8 (avoids mojibake like Â£ before £).
+        with open(summary_path, "w", newline="", encoding="utf-8-sig") as f_pretty:
             w_pretty = csv.DictWriter(f_pretty, fieldnames=headers, extrasaction="ignore")
-            w_pbi = csv.DictWriter(f_pbi, fieldnames=headers, extrasaction="ignore")
             w_pretty.writeheader()
-            w_pbi.writeheader()
             for r in results:
                 # Build Excel-friendly hyperlink formulas for CSV so that Order/Quote are clickable
                 order_number = getattr(r, "order_number", "") or ""
@@ -971,7 +996,7 @@ def print_summary(
                     "StartPort Speed": getattr(r, "start_port_speed", "") or "",
                     "EndPort Speed": getattr(r, "end_port_speed", "") or "",
                     "PathSpeed": getattr(r, "path_speed", "") or "",
-                    "TermLength": _term_length_for_powerbi(getattr(r, "term_length", "") or ""),
+                    "TermLength": _term_length_cell(getattr(r, "term_length", "") or ""),
                     "InstallPrice": _format_currency(install_raw),
                     "AnnualRental": _format_currency(annual_raw),
                     "FTTP Aggregation": _format_currency(ftpp_raw),
@@ -985,38 +1010,30 @@ def print_summary(
                     "Order": order_cell,
                     "Quote": quote_cell,
                     "Result": r.result,
-                    "Duration (seconds)": round(r.duration_sec, 1),
+                    "Duration": _format_duration_cell(r.duration_sec),
                     "Date Completed": getattr(r, "completed_at", date_str) or date_str,
                     "Error": (r.error_detail or "")[:2000],
                 }
 
-                w_pretty.writerow(base_row)
+                pretty_row = dict(base_row)
+                pretty_row["Date Completed"] = _date_completed_for_excel_csv(
+                    pretty_row.get("Date Completed") or ""
+                )
+                w_pretty.writerow(pretty_row)
 
-                base_row_pbi = dict(base_row)
-                base_row_pbi["BasketId"] = getattr(r, "basket_id", "") or ""
-                # For Power BI: plain IDs in Order/Quote (no HYPERLINK formulas)
-                base_row_pbi["Order"] = order_number
-                base_row_pbi["Quote"] = quote_number
-                base_row_pbi["InstallPrice"] = _currency_numeric(install_raw)
-                base_row_pbi["AnnualRental"] = _currency_numeric(annual_raw)
-                base_row_pbi["FTTP Aggregation"] = _currency_numeric(ftpp_raw)
-                base_row_pbi["NegotiatedAnnual"] = _currency_numeric(getattr(r, "negotiated_annual", "") or "")
-                base_row_pbi["NegotiatedInstall"] = _currency_numeric(getattr(r, "negotiated_install", "") or "")
-                base_row_pbi["ListAnnual"] = _currency_numeric(getattr(r, "list_annual", "") or "")
-                base_row_pbi["ListInstall"] = _currency_numeric(getattr(r, "list_install", "") or "")
-                base_row_pbi["InstallDiscount"] = _currency_numeric(getattr(r, "discount_install", "") or "")
-                base_row_pbi["AnnualDiscount"] = _currency_numeric(getattr(r, "discount_annual", "") or "")
-                w_pbi.writerow(base_row_pbi)
-
-        print(f"\n  Summary saved to: {summary_path}")
-        print(f"  Power BI summary (numeric currency) saved to: {summary_powerbi}")
-        # Also write Excel with clickable Order/Quote hyperlinks
+        print(f"\n  Summary CSV saved to: {summary_path}")
         summary_xlsx = summary_path.with_suffix(".xlsx")
+        if not OPENPYXL_AVAILABLE:
+            print("  (Excel summary skipped: install openpyxl for column-sized .xlsx output.)\n")
+            return summary_path
         try:
             _write_summary_xlsx(results, summary_xlsx, date_str, headers)
             print(f"  Excel summary (clickable Order/Quote links): {summary_xlsx}\n")
+            return summary_xlsx
         except Exception as e:
             print(f"  (Excel summary skipped: {e})\n")
+            return summary_path
+    return None
 
 
 def fill_basket_ids_with_internal_user(results: list[RowResult], mode: str) -> None:
@@ -1256,9 +1273,11 @@ def run_csv_regression(
     progress_callback=None,
     progress_dict: dict | None = None,
     mode: str = "demo1",
-) -> tuple[int, list[RowResult], Path | None, Path | None]:
+) -> tuple[int, list[RowResult], Path | None]:
     """
-    Run regression from CSV. Returns (exit_code, results, summary_path).
+    Run regression from CSV. Returns (exit_code, results, summary_download_path).
+
+    summary_download_path is the file to offer in the UI (Excel when openpyxl is available, else CSV).
     quiet=True: headless, minimal output, summary at end
     verbose=True: show per-preset progress
     """
@@ -1266,10 +1285,10 @@ def run_csv_regression(
     if errors:
         for e in errors:
             print(f"  ⚠️ {e}")
-        return 1, [], None, None
+        return 1, [], None
     if not rows:
         print("  ⚠️ No valid rows in CSV.")
-        return 1, [], None, None
+        return 1, [], None
 
     # Confirm
     if verbose:
@@ -1282,7 +1301,7 @@ def run_csv_regression(
 
     if not RUN_PRESET_SCRIPT.exists():
         print(f"  ❌ Missing {RUN_PRESET_SCRIPT}")
-        return 1, [], None, None
+        return 1, [], None
 
     if quiet:
         print("\n  Processing your CSV... (runs in background, no browser window)")
@@ -1306,7 +1325,6 @@ def run_csv_regression(
     start_total = time.perf_counter()
     run_id_readable = datetime.now().strftime("%Y-%m-%d %H:%M")
     summary_path = RESULTS_DIR / "P2NNI_regression_summary.csv"
-    summary_path_powerbi = RESULTS_DIR / "P2NNI_regression_summary_powerbi.csv"
 
     temp_paths: list[Path] = []
     total = len(rows)
@@ -1400,7 +1418,7 @@ def run_csv_regression(
         q = pd.get("quote") or {}
         billing = pd.get("billing") or {}
         def _port_mbps(val):
-            """Normalise bearer/bandwidth to Mbps string for Power BI.
+            """Normalise bearer/bandwidth to Mbps string for the summary export.
 
             Examples:
               - '10 Gbps' -> '10000'
@@ -1427,7 +1445,7 @@ def run_csv_regression(
             return ""
 
         def _term_months(ct):
-            """Contract term to numeric months for Power BI TermLength (e.g. '3 years' -> '36')."""
+            """Contract term to numeric months for summary TermLength (e.g. '3 years' -> '36')."""
             if ct is None:
                 return ""
             s = str(ct).strip().lower()
@@ -1517,13 +1535,15 @@ def run_csv_regression(
                 r.exit_code = 1
                 r.result = "Fail"
                 r.error_detail = (r.error_detail + "\n" if r.error_detail else "") + (
-                    "Demo requirement not met: BasketId capture requested, but BasketId was not captured."
+                    "BasketId capture requested, but BasketId was not captured."
                 )
 
     total_duration = time.perf_counter() - start_total
-    print_summary(results, total_duration, summary_path, summary_path_powerbi, run_id=run_id_readable, mode=mode)
+    summary_download_path = print_summary(
+        results, total_duration, summary_path, run_id=run_id_readable, mode=mode
+    )
     failed = sum(1 for r in results if r.exit_code != 0)
-    return 1 if failed > 0 else 0, results, summary_path, summary_path_powerbi
+    return 1 if failed > 0 else 0, results, summary_download_path
 
 
 def main():
@@ -1567,7 +1587,7 @@ Examples:
             sys.exit(1)
 
     quiet = args.quiet or not args.verbose  # Default to quiet for customer use
-    code, _, _, _ = run_csv_regression(csv_path, quiet=quiet, verbose=args.verbose, mode="demo1")
+    code, _, _ = run_csv_regression(csv_path, quiet=quiet, verbose=args.verbose, mode="demo1")
     sys.exit(code)
 
 

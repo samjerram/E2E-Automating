@@ -4,7 +4,9 @@ This file records **official, known-good checkpoints** you can roll back to or r
 
 **Latest (code narrative):** **v7** (2026-04-09) — VLAN Tagging Value (N/A when No), FTTP Yes hardening, Playwright **N/A** radio selector fix, Excel template validation, `run_preset` parse repairs.
 
-**Latest (git tag for presentation UI):** **`checkpoint/presentation-stable`** (2026-04-13) — Regression Pack + Bulk Order only in the UI; Flask `/run` guard; Windows login/focus helpers; see section at end of this file.
+**Latest (git tag for presentation UI):** **`checkpoint/presentation-final-2026-04-13`** — locked **final presentation demo**: UI steps 1–4, auth hints, Excel-first summary download, no Power BI/SharePoint UI, widened summary columns, CSV/encoding polish, BasketId fail copy; see section at end of this file.
+
+**Previous presentation tag:** **`checkpoint/presentation-stable`** (2026-04-13) — Regression Pack + Bulk Order only; mode guard; Windows helpers (superseded for demo day by the tag above).
 
 ---
 
@@ -310,3 +312,32 @@ git reset --hard checkpoint/presentation-stable
 **Push tag to GitHub (optional):** `git push origin checkpoint/presentation-stable`
 
 If you have **additional local edits** (e.g. on another machine) not yet committed, commit them before resetting, or this tag will not include them.
+
+---
+
+## Git tag: `checkpoint/presentation-final-2026-04-13` (2026-04-13)
+
+**Purpose:** **Final locked-in presentation demo** — revert here anytime you want this exact UI + summary + messaging behaviour.
+
+**Includes (typical files at tag time):**
+
+- **`templates/index.html`** — Steps **1–4** in order (session → Excel/CSV hint → upload → run); auth hints for Regression Pack vs Bulk Order; Step 1 copy trimmed to “Open in Excel and save as CSV.”; removed Run to PBI / Power BI CSV / SharePoint panel; **Download summary** serves the fitted-column **Excel** summary when `openpyxl` is available (else CSV).
+- **`app.py`** — `/run` returns a single `summary_filename` (download path); SharePoint URL and Power BI–related JSON fields removed.
+- **`run_csv_regression.py`** — Single human summary CSV (`utf-8-sig`) + `.xlsx` with widened columns; no `*_powerbi.csv`; duration as “N seconds”; date cell / encoding helpers; BasketId failure text without “Demo requirement” prefix; `run_csv_regression` return tuple simplified to `(exit_code, results, summary_download_path)`.
+- **`run_preset.py`** — whatever automation fixes are on `main` at commit time (keep in sync with your demo runs).
+- **`sharepoint_upload.py`** — **removed** from the tree at this checkpoint (manual SharePoint helper no longer used by the app).
+
+**Restore to this tag:**
+
+```bat
+git fetch --tags
+git checkout checkpoint/presentation-final-2026-04-13
+```
+
+Hard reset (discards uncommitted local changes):
+
+```bat
+git reset --hard checkpoint/presentation-final-2026-04-13
+```
+
+**Push tag to GitHub (optional):** `git push origin main` then `git push origin checkpoint/presentation-final-2026-04-13`
